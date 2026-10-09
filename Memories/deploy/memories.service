@@ -1,0 +1,20 @@
+[Unit]
+Description=Memories family photo library
+After=network.target
+
+[Service]
+Type=simple
+User=memories
+Group=memories
+WorkingDirectory=/opt/memories
+EnvironmentFile=/etc/memories.env
+ExecStart=/opt/memories/.venv/bin/gunicorn --worker-class gthread --workers 2 --threads 8 --timeout 120 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - "backend.app:create_app()"
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/memories /srv/memories
+
+[Install]
+WantedBy=multi-user.target

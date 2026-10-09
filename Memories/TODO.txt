@@ -1,0 +1,80 @@
+Memories — to-do queue
+======================
+
+Work top to bottom. Items in the same group can be done together.
+
+
+NOW — get the family using it
+-----------------------------
+
+1. Visual check of the web app on a laptop and an iPhone (test run over Tailscale).
+   - Sign-in page, library grid, Recently deleted, Family accounts page.
+   - Phone-width layout.
+   - Upload from an iPhone: confirm the photo arrives as .HEIC (original kept), not converted to JPEG.
+   - Upload the same photo twice, and once after deleting it (Restore notice).
+
+2. Commit the remaining uncommitted changes to git (frontend, tests, README, deploy units, requirements).
+
+3. Deploy as a 24/7 service (see README "Keep it running on the server").
+   - Create the memories service account and /var/lib/memories, /srv/memories.
+   - Copy the app to /opt/memories, create its venv, build the frontend.
+   - Write /etc/memories.env with a real SECRET_KEY.
+   - Install and enable memories.service and memories-purge.timer.
+
+4. Publish over Tailscale with HTTPS.
+   - Enable MagicDNS and HTTPS certificates in the Tailscale admin console.
+   - sudo tailscale serve --bg 8000
+   - Install Tailscale on each family member's devices and invite them to the tailnet.
+
+5. Create family accounts from the Family accounts page.
+
+
+NEXT — video and performance (all need ffmpeg, now installed)
+---------------------------------------------------------------
+
+6. Read capture dates from videos (iPhone .mov creation date) instead of using upload time.
+
+7. Convert iPhone HEVC videos to an H.264 copy for browsers on Windows PCs
+   (keep the original; run in the background so uploads stay fast).
+
+8. Thumbnails for photos and video poster frames, so the grid stops loading full-size files.
+
+9. Background job runner for 7 and 8 (with a "processing" state in the UI).
+
+
+SAFETY
+------
+
+10. Backups of the SQLite database and the media folder (schedule + restore test).
+
+11. Login rate limiting (slow down repeated wrong passwords).
+
+12. Periodic integrity check: re-hash originals and compare to the stored SHA-256.
+
+
+EXTERNAL DRIVE (when it arrives)
+--------------------------------
+
+13. Mount the 2 TB drive persistently (/etc/fstab).
+
+14. Move the library: stop app, copy MEDIA_ROOT, verify hashes, update MEDIA_ROOT and
+    ReadWritePaths in the systemd units, start app, confirm, then remove the old copy.
+    (Optional: a guided migration command that does the copy + verify.)
+
+
+FEATURES
+--------
+
+15. Photo viewer: click a photo to open it full-screen, with next/previous.
+
+16. Filter by uploader ("show me Mom's uploads") and by date range.
+
+17. Albums (curated collections without duplicating files).
+
+18. Bulk select: move several items to the trash, restore, download.
+
+19. Favorites and tags; search.
+
+20. Let each person change their own password.
+
+21. Near-duplicate detection (resized/recompressed copies), beyond exact-file matching.
