@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly purge of Memories items past the 30-day trash period
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10m
+Unit=memories-purge.service
+
+[Install]
+WantedBy=timers.target

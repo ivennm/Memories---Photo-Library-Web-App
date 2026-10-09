@@ -4,7 +4,9 @@ import io
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from PIL import Image
+from PIL import ExifTags, Image
+
+from werkzeug.security import generate_password_hash
 
 from backend.app import create_app, iso_timestamp
 
@@ -49,17 +51,18 @@ def test_first_user_can_upload_list_and_restore_photo(client, app):
     assert photo["original_name"] == "summer.jpg"
     assert photo["uploaded_by"] == "family"
     assert photo["taken_at"] == photo["uploaded_at"]
-    stored_file = app.config["MEDIA_ROOT"] / photo["taken_at"][:4] / photo["taken_at"][5:7]
-    assert len(list(stored_file.iterdir())) == 1
+    assert photo["taken_at"].endswith("Z")
+    assert len(list(app.config["MEDIA_ROOT"].rglob("*.jpg"))) == 1
 
     assert client.delete(f"/api/photos/{photo['id']}").status_code == 200
     assert client.get("/api/photos").json == []
     assert len(client.get("/api/trash").json) == 1
+    assert client.get(photo["content_url"]).data == b"sample image bytes"
     assert client.post(f"/api/photos/{photo['id']}/restore").status_code == 200
     assert len(client.get("/api/photos").json) == 1
 
 
-def test_duplicate_file_is_rejected_even_after_being_trashed(client):
+def test_duplicate_of_trashed_file_points_to_restore(client):
     assert establish_first_user(client).status_code == 201
     contents = b"same exact file"
     first = client.post(
@@ -76,12 +79,25 @@ def test_duplicate_file_is_rejected_even_after_being_trashed(client):
         content_type="multipart/form-data",
     )
     assert duplicate.status_code == 409
+    assert duplicate.json["code"] == "in_trash"
+    assert duplicate.json["photo_id"] == photo_id
+    assert duplicate.json["error"] == "one.jpg was recently deleted."
+
+    assert client.post(f"/api/photos/{photo_id}/restore").status_code == 200
+    again = client.post(
+        "/api/photos",
+        data={"file": (io.BytesIO(contents), "copy.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert again.status_code == 409
+    assert again.json["code"] == "duplicate"
 
 
 def test_photo_capture_date_is_used_for_library_path(client, app):
     assert establish_first_user(client).status_code == 201
     exif = Image.Exif()
     exif[306] = "2014:05:20 12:30:45"
+    exif.get_ifd(ExifTags.IFD.Exif)[36880] = "-04:00"
     image_bytes = io.BytesIO()
     Image.new("RGB", (2, 2), "red").save(image_bytes, format="JPEG", exif=exif)
     image_bytes.seek(0)
@@ -93,7 +109,7 @@ def test_photo_capture_date_is_used_for_library_path(client, app):
     )
     assert uploaded.status_code == 201
     photo = client.get("/api/photos").json[0]
-    assert photo["taken_at"].startswith("2014-05-20T12:30:45")
+    assert photo["taken_at"] == "2014-05-20T16:30:45Z"
     assert (app.config["MEDIA_ROOT"] / "2014" / "05").is_dir()
 
 
@@ -140,3 +156,161 @@ def test_first_account_setup_closes_after_first_user(client):
         json={"username": "another", "password": "another-long-password"},
     )
     assert second.status_code == 409
+
+
+def upload(client, contents, name):
+    return client.post(
+        "/api/photos",
+        data={"file": (io.BytesIO(contents), name)},
+        content_type="multipart/form-data",
+    )
+
+
+def test_heic_photo_gets_capture_date_and_jpeg_display_copy(client, app):
+    import pillow_heif
+
+    assert establish_first_user(client).status_code == 201
+    exif = Image.Exif()
+    exif.get_ifd(ExifTags.IFD.Exif)[36867] = "2021:12:25 08:15:00"
+    exif.get_ifd(ExifTags.IFD.Exif)[36881] = "-05:00"
+    heic = pillow_heif.from_pillow(Image.new("RGB", (64, 64), "blue"))
+    image_bytes = io.BytesIO()
+    heic.save(image_bytes, exif=exif.tobytes())
+
+    assert upload(client, image_bytes.getvalue(), "IMG_0001.HEIC").status_code == 201
+    photo = client.get("/api/photos").json[0]
+    assert photo["taken_at"] == "2021-12-25T13:15:00Z"
+    assert photo["content_type"] == "image/heic"
+    assert (app.config["MEDIA_ROOT"] / "2021" / "12").is_dir()
+
+    display = client.get(photo["content_url"])
+    assert display.mimetype == "image/jpeg"
+    assert display.data[:2] == b"\xff\xd8"
+    original = client.get(photo["original_url"])
+    assert original.data == image_bytes.getvalue()
+    assert "IMG_0001.HEIC" in original.headers["Content-Disposition"]
+
+
+def make_family_member(client, username="mom", password="moms-long-password"):
+    response = client.post(
+        "/api/admin/users", json={"username": username, "password": password}
+    )
+    assert response.status_code == 201
+    return next(u for u in client.get("/api/admin/users").json if u["username"] == username)
+
+
+def test_first_account_is_the_only_admin(client, app):
+    assert establish_first_user(client).status_code == 201
+    assert client.get("/api/session").json["is_admin"] is True
+    make_family_member(client)
+
+    member = app.test_client()
+    assert member.post(
+        "/api/login", json={"username": "mom", "password": "moms-long-password"}
+    ).status_code == 200
+    assert member.get("/api/session").json["is_admin"] is False
+    assert member.get("/api/admin/users").status_code == 403
+    assert member.post(
+        "/api/admin/users", json={"username": "kid", "password": "kids-long-password"}
+    ).status_code == 403
+
+
+def test_admin_resets_password_and_signs_out_old_sessions(client, app):
+    assert establish_first_user(client).status_code == 201
+    mom = make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+
+    assert client.post(
+        f"/api/admin/users/{mom['id']}/password", json={"password": "short"}
+    ).status_code == 400
+    assert client.post(
+        f"/api/admin/users/{mom['id']}/password", json={"password": "a-brand-new-password"}
+    ).status_code == 200
+    assert member.get("/api/photos").status_code == 401
+    assert member.post(
+        "/api/login", json={"username": "mom", "password": "moms-long-password"}
+    ).status_code == 401
+    assert member.post(
+        "/api/login", json={"username": "mom", "password": "a-brand-new-password"}
+    ).status_code == 200
+
+
+def test_removed_account_keeps_photo_credit_but_cannot_sign_in(client, app):
+    assert establish_first_user(client).status_code == 201
+    mom = make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    assert upload(member, b"mom's photo", "beach.jpg").status_code == 201
+
+    me = next(u for u in client.get("/api/admin/users").json if u["is_admin"])
+    assert client.delete(f"/api/admin/users/{me['id']}").status_code == 400
+    assert client.delete(f"/api/admin/users/{mom['id']}").status_code == 200
+    assert member.get("/api/photos").status_code == 401
+    assert member.post(
+        "/api/login", json={"username": "mom", "password": "moms-long-password"}
+    ).status_code == 401
+    assert client.get("/api/photos").json[0]["uploaded_by"] == "mom"
+
+
+def test_only_admin_can_delete_from_trash_early(client, app):
+    assert establish_first_user(client).status_code == 201
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    assert upload(member, b"blurry photo", "blurry.jpg").status_code == 201
+    photo_id = member.get("/api/photos").json[0]["id"]
+
+    assert client.delete(f"/api/trash/{photo_id}").status_code == 404
+    assert member.delete(f"/api/photos/{photo_id}").status_code == 200
+    assert member.delete(f"/api/trash/{photo_id}").status_code == 403
+    assert client.delete(f"/api/trash/{photo_id}").status_code == 200
+    assert client.get("/api/trash").json == []
+    assert not list(app.config["MEDIA_ROOT"].rglob("*.jpg"))
+
+
+def test_built_frontend_is_served_alongside_the_api(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<title>Memories</title>")
+    (dist / "assets" / "app.js").write_text("console.log('hi')")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.sqlite3"))
+    monkeypatch.setenv("MEDIA_ROOT", str(tmp_path / "media"))
+    monkeypatch.setenv("FRONTEND_DIST", str(dist))
+    client = create_app().test_client()
+
+    assert b"Memories" in client.get("/").data
+    assert b"Memories" in client.get("/trash").data
+    assert client.get("/assets/app.js").data == b"console.log('hi')"
+    missing_api = client.get("/api/nothing-here")
+    assert missing_api.status_code == 404
+    assert "error" in missing_api.json
+
+
+def test_existing_library_is_upgraded_and_first_account_becomes_admin(tmp_path, monkeypatch):
+    import sqlite3
+
+    database_path = tmp_path / "library.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript("""
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE photos (id TEXT PRIMARY KEY, original_name TEXT NOT NULL,
+                relative_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL UNIQUE,
+                content_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, taken_at TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL, uploaded_by INTEGER NOT NULL REFERENCES users(id),
+                deleted_at TEXT);
+        """)
+        for username in ("iven", "mom"):
+            connection.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, generate_password_hash("a-long-test-password"), "2026-10-01T00:00:00Z"),
+            )
+    monkeypatch.setenv("DATABASE_PATH", str(database_path))
+    monkeypatch.setenv("MEDIA_ROOT", str(tmp_path / "media"))
+    client = create_app().test_client()
+
+    client.post("/api/login", json={"username": "iven", "password": "a-long-test-password"})
+    assert client.get("/api/session").json["is_admin"] is True
+    users = {u["username"]: u["is_admin"] for u in client.get("/api/admin/users").json}
+    assert users == {"iven": True, "mom": False}
