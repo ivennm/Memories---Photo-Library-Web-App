@@ -286,3 +286,35 @@ To reset your own password now: on the signed-in MacBook, go to My account > Cha
 User: there is a 3 character limit for username but i want a two character username
 
 Assistant: Lowered the username minimum from 3 to 2 characters (server check and all username fields in the web app: sign-in, My account, Family accounts add/rename). Maximum stays 40. Added a test for a 2-character rename; 20 tests pass, frontend builds, test server restarted. Nothing committed.
+
+User: on mobile there are emojis remove these from the app
+
+Assistant: Removed all symbol/emoji characters from the web app (iPhone Safari drew several as color emoji): the ✳ logo mark is now a plain "M"; the navigation icons (▦ ⌑ ☺ ⚙), the "＋" on the upload button and the empty-state icons are gone; the ↪ sign-out icon is now the words "Sign out". Matching CSS tidied. Only ordinary punctuation (… and ·) remains. Frontend rebuilt; the running test server serves it after a page refresh. Nothing committed.
+
+User: ok now show me how to add icons like trash icon to the move to trash button
+
+Assistant: Added a trash icon to the "Move to trash" button as an inline SVG (not an emoji, so it looks the same on every device and takes the button's text color). New file frontend/src/icons.tsx holds a shared Icon wrapper and TrashIcon; App.tsx imports it and puts <TrashIcon /> in the button; style.css sizes .icon to the text and lines up icon + label. To add another icon: copy a 24x24 line icon's <path> elements (e.g. from lucide.dev, ISC license) into a new function in icons.tsx, import it, and put it inside the button. Frontend rebuilt; nothing committed.
+
+User: (pasted a lucide-react example: import { Trash } from 'lucide-react'; <Trash />)
+
+Assistant: Switched to the lucide-react icon package instead of hand-drawn SVGs: installed lucide-react 1.58.0 (ISC license, pinned exact version in package.json), the "Move to trash" button now uses <Trash className="icon" aria-hidden="true" />, and removed the hand-made frontend/src/icons.tsx. The existing .icon CSS sizes it to the button text. To add more: find the icon name on lucide.dev, import it from "lucide-react" and place it in the button the same way (e.g. Download, RotateCcw for Restore, LogOut for Sign out). Frontend rebuilt; nothing committed.
+
+User: i want to remove the Move to trash text but i did and it doesnt show on the app
+
+Assistant: The edit to App.tsx was right; the app just hadn't been rebuilt. The server serves the compiled files in frontend/dist, so frontend changes only appear after `npm run build` (then refresh the page). Added aria-label="Move to trash" and title="Move to trash" to the now icon-only button so screen readers can name it and a tooltip shows on hover. Rebuilt; the running server serves the new build. Nothing committed.
+To rebuild after editing frontend code:
+  cd ~/code/projects/PhotoApp/Memories/frontend
+  export PATH=$HOME/.local/opt/node/bin:$PATH
+  npm run build
+
+User: ok apple already has a download feature so no need for the download button, also for the trash button lets move it to a drop down like a 3 dots that when clicked show more options and one of those is the trash icon
+
+Assistant: Removed the Download button from photo cards (library and Recently deleted). The trash action now lives in a "⋯" menu (lucide Ellipsis icon) on the right of each photo's name row; tapping it opens a dropdown with "Move to trash" (Trash icon), which still asks for confirmation. The menu closes on a tap outside it or Escape. Recently deleted keeps its Restore / Delete forever buttons. CSS: the card no longer clips its contents (so the dropdown can extend past it) and the photo's top corners are rounded instead; the ⋯ button is a 32px tap target. Note: the /api/photos/<id>/original download route still exists on the server, just with no button. Frontend rebuilt; not visually checked by Claude (no browser on the server). Nothing committed.
+
+User: how do I see changes made after I save the code so that they appear on the app
+
+Assistant: The app serves the compiled frontend in frontend/dist, so it must be rebuilt after edits. Added an npm script `watch` (vite build --watch) that rebuilds automatically on every save; leave it running in a terminal, then just refresh the browser:
+  cd ~/code/projects/PhotoApp/Memories/frontend
+  export PATH=$HOME/.local/opt/node/bin:$PATH
+  npm run watch
+Watch mode skips the TypeScript type check; run `npm run build` before committing (or rely on VS Code's red underlines). Backend (Python) changes need a server restart instead; adding --reload to the gunicorn test-run command makes it restart automatically on save.
