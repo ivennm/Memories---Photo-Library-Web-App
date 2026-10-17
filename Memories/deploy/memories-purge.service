@@ -1,5 +1,6 @@
 [Unit]
 Description=Remove Memories media after the 30-day trash period
+RequiresMountsFor=/mnt/drive-2
 
 [Service]
 Type=oneshot
@@ -11,4 +12,4 @@ ExecStart=/opt/memories/.venv/bin/flask --app backend.app:create_app purge-expir
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/memories /srv/memories
+ReadWritePaths=/var/lib/memories /mnt/drive-2/memories

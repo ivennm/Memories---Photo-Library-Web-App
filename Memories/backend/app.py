@@ -102,8 +102,8 @@ def parse_exif_datetime(raw_date: Any, raw_offset: Any) -> datetime | None:
 
 
 def credential_error(username: str | None, password: str | None) -> str | None:
-    if username is not None and not 3 <= len(username) <= 40:
-        return "Username must be 3 to 40 characters."
+    if username is not None and not 2 <= len(username) <= 40:
+        return "Username must be 2 to 40 characters."
     if password is not None and len(password) < 12:
         return "Password must be at least 12 characters."
     if password is not None and len(password) > 1024:
@@ -134,6 +134,10 @@ def create_app() -> Flask:
     app.config["MEDIA_ROOT"] = Path(
         os.environ.get("MEDIA_ROOT", "./data/library")
     ).resolve()
+    # Mount point of the dedicated media drive. When set, media is only written while that
+    # drive is mounted, so an unmounted drive can't silently fill the OS disk instead.
+    media_mount = os.environ.get("MEDIA_MOUNT")
+    app.config["MEDIA_MOUNT"] = Path(media_mount).resolve() if media_mount else None
     app.config["FRONTEND_DIST"] = Path(
         os.environ.get("FRONTEND_DIST", Path(__file__).resolve().parent.parent / "frontend" / "dist")
     ).resolve()
@@ -149,6 +153,16 @@ def create_app() -> Flask:
         raise RuntimeError("Set SECRET_KEY to a persistent random value in production.")
 
     media_root: Path = app.config["MEDIA_ROOT"]
+    media_mount: Path | None = app.config["MEDIA_MOUNT"]
+    if media_mount is not None:
+        if not media_root.is_relative_to(media_mount):
+            raise RuntimeError(f"MEDIA_ROOT ({media_root}) must be inside MEDIA_MOUNT ({media_mount}).")
+        if not os.path.ismount(media_mount):
+            raise RuntimeError(f"The media drive is not mounted at {media_mount}.")
+
+    def media_drive_available() -> bool:
+        return media_mount is None or os.path.ismount(media_mount)
+
     app.config["DATABASE_PATH"].parent.mkdir(parents=True, exist_ok=True)
     media_root.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(app.config["DATABASE_PATH"]) as connection:
@@ -359,6 +373,9 @@ def create_app() -> Flask:
         extension = Path(safe_name).suffix.lower().lstrip(".")
         if extension not in ALLOWED_EXTENSIONS:
             return jsonify({"error": "This photo or video file type is not supported."}), 400
+        if not media_drive_available():
+            logger.error("Upload refused: media drive is not mounted at %s", media_mount)
+            return jsonify({"error": "The photo library drive is unavailable. Try again later."}), 503
 
         photo_id = uuid.uuid4().hex
         temp_path = media_root / f".upload-{uuid.uuid4().hex}.tmp"
@@ -515,6 +532,8 @@ def create_app() -> Flask:
         ).fetchone()
         if row is None:
             return jsonify({"error": "Photo not found in trash."}), 404
+        if not media_drive_available():
+            return jsonify({"error": "The photo library drive is unavailable. Try again later."}), 503
         erase_photo(connection, row)
         connection.commit()
         return jsonify({"status": "deleted"}), 200
@@ -582,6 +601,63 @@ def create_app() -> Flask:
         if user_id == admin["id"]:
             session["session_version"] = admin["session_version"] + 1
         return jsonify({"status": "password_reset"}), 200
+
+    def rename_user(user_id: int, username: str) -> tuple[Any, int]:
+        if error := credential_error(username, None):
+            return jsonify({"error": error}), 400
+        connection = database()
+        try:
+            cursor = connection.execute(
+                "UPDATE users SET username = ? WHERE id = ? AND removed_at IS NULL",
+                (username, user_id),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "That username is already in use."}), 409
+        if cursor.rowcount == 0:
+            return jsonify({"error": "Account not found."}), 404
+        return jsonify({"username": username}), 200
+
+    @app.post("/api/admin/users/<int:user_id>/username")
+    def admin_rename_user(user_id: int) -> tuple[Any, int]:
+        require_admin()
+        return rename_user(user_id, str(request_json().get("username", "")).strip())
+
+    def verify_current_password(user: sqlite3.Row, password: str) -> bool:
+        row = database().execute(
+            "SELECT password_hash FROM users WHERE id = ?", (user["id"],)
+        ).fetchone()
+        return check_password_hash(row["password_hash"], password)
+
+    @app.post("/api/account/username")
+    def change_own_username() -> tuple[Any, int]:
+        user = require_user()
+        data = request_json()
+        if not verify_current_password(user, str(data.get("current_password", ""))):
+            return jsonify({"error": "Your current password is incorrect."}), 403
+        return rename_user(user["id"], str(data.get("username", "")).strip())
+
+    @app.post("/api/account/password")
+    def change_own_password() -> tuple[Any, int]:
+        user = require_user()
+        data = request_json()
+        if not verify_current_password(user, str(data.get("current_password", ""))):
+            return jsonify({"error": "Your current password is incorrect."}), 403
+        password = str(data.get("new_password", ""))
+        if error := credential_error(None, password):
+            return jsonify({"error": error}), 400
+        connection = database()
+        connection.execute(
+            """
+            UPDATE users SET password_hash = ?, session_version = session_version + 1
+            WHERE id = ?
+            """,
+            (generate_password_hash(password), user["id"]),
+        )
+        connection.commit()
+        # Other devices are signed out; this one stays signed in.
+        session["session_version"] = user["session_version"] + 1
+        return jsonify({"status": "password_changed"}), 200
 
     @app.delete("/api/admin/users/<int:user_id>")
     def admin_remove_user(user_id: int) -> tuple[Any, int]:
@@ -653,6 +729,30 @@ def create_app() -> Flask:
         if cursor.rowcount == 0:
             raise SystemExit("No active account has that username.")
         print(f"Password reset for {username}.")
+
+    @app.cli.command("rename-user")
+    def rename_user_command() -> None:
+        """Recovery path for a forgotten username, including the admin account."""
+        names = database().execute(
+            "SELECT username FROM users WHERE removed_at IS NULL ORDER BY username COLLATE NOCASE"
+        ).fetchall()
+        print("Accounts: " + ", ".join(row["username"] for row in names))
+        old_username = input("Current username: ").strip()
+        new_username = input("New username: ").strip()
+        if error := credential_error(new_username, None):
+            raise SystemExit(error)
+        connection = database()
+        try:
+            cursor = connection.execute(
+                "UPDATE users SET username = ? WHERE username = ? AND removed_at IS NULL",
+                (new_username, old_username),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as error:
+            raise SystemExit("That username is already in use.") from error
+        if cursor.rowcount == 0:
+            raise SystemExit("No active account has that username.")
+        print(f"Renamed {old_username} to {new_username}.")
 
     @app.cli.command("purge-expired")
     def purge_expired_command() -> None:
