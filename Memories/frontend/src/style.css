@@ -20,12 +20,11 @@ button:disabled { cursor: wait; opacity: .65; }
   display: flex; flex-direction: column; background: #fff; border-right: 1px solid #ecebe6;
 }
 .brand { display: flex; align-items: center; gap: 11px; margin: 0 6px 55px; color: inherit; text-decoration: none; font: 800 19px "Avenir Next", Avenir, sans-serif; letter-spacing: -.7px; }
-.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; color: #fff; background: #74856b; border-radius: 11px; font-size: 20px; }
+.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; color: #fff; background: #74856b; border-radius: 11px; font: 800 17px "Avenir Next", Avenir, sans-serif; }
 .brand-light { color: #99998f; font-weight: 500; }
 .side-label, .eyebrow { color: #9b9b90; font-size: 10px; font-weight: 700; letter-spacing: 1.5px; }
 .side-label { margin: 0 10px 12px; }
 .nav-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 11px; color: #6d6e66; background: transparent; border: 0; border-radius: 8px; text-align: left; font-size: 13px; }
-.nav-item > span:first-child { width: 18px; font-size: 18px; text-align: center; }
 .nav-item.selected { color: #526448; background: #f0f2ec; font-weight: 600; }
 .nav-count { margin-left: auto; color: #99998f; font-size: 11px; }
 .sidebar-bottom { display: flex; align-items: center; gap: 10px; margin-top: auto; padding: 15px 2px 0; border-top: 1px solid #eeede8; }
@@ -33,7 +32,7 @@ button:disabled { cursor: wait; opacity: .65; }
 .user-info { display: grid; gap: 3px; min-width: 0; }
 .user-info strong { max-width: 130px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .user-info span { color: #99998f; font-size: 10px; }
-.icon-button { margin-left: auto; border: 0; background: none; color: #85867d; font-size: 18px; }
+.icon-button { margin-left: auto; border: 0; background: none; color: #85867d; font-size: 11px; font-weight: 600; }
 .main-content { max-width: 1600px; margin-left: 248px; padding: 46px 54px 72px; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 39px; }
 .topbar .eyebrow { margin: 0 0 7px; }
@@ -42,28 +41,35 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .primary-button { padding: 11px 17px; color: #fff; background: #65775b; border: 0; border-radius: 7px; font-size: 12px; font-weight: 600; transition: background .15s; }
 .primary-button:hover { background: #526448; }
 .upload-button { display: flex; align-items: center; gap: 7px; }
-.upload-button span { font-size: 17px; }
 .month-group { margin-bottom: 39px; }
 .month-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 17px; }
 .month-heading h2 { margin: 0; font: 700 16px "Avenir Next", Avenir, sans-serif; }
 .month-heading span { color: #9b9b90; font-size: 11px; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 17px; }
-.photo-card { overflow: hidden; background: #fff; border: 1px solid #eeede8; border-radius: 9px; }
-.photo-card > img, .photo-card > video { display: block; width: 100%; height: 180px; object-fit: cover; background: #efeee9; }
-.photo-details { display: grid; gap: 5px; padding: 11px 12px 12px; }
+.photo-card { background: #fff; border: 1px solid #eeede8; border-radius: 9px; }
+.photo-card > img, .photo-card > video { display: block; width: 100%; height: 180px; object-fit: cover; background: #efeee9; border-radius: 8px 8px 0 0; }
+.photo-details { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 5px 8px; padding: 11px 12px 12px; }
+.photo-text { display: grid; gap: 5px; min-width: 0; }
 .photo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 600; }
 .photo-byline { color: #99998f; font-size: 10px; }
 .text-button { justify-self: start; padding: 3px 0 0; color: #617153; background: none; border: 0; font-size: 10px; font-weight: 600; text-decoration: none; }
-.photo-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.photo-actions { display: flex; flex-wrap: wrap; grid-column: 1 / -1; gap: 12px; }
+.photo-menu { position: relative; }
+.menu-button { display: grid; place-items: center; width: 32px; height: 32px; margin: -6px -7px 0 0; color: #85867d; background: none; border: 0; border-radius: 7px; font-size: 14px; }
+.menu-button:hover, .menu-button[aria-expanded="true"] { color: #272923; background: #f0f2ec; }
+.menu-list { position: absolute; top: calc(100% + 4px); right: -7px; z-index: 10; min-width: 160px; padding: 5px; background: #fff; border: 1px solid #e6e5df; border-radius: 9px; box-shadow: 0 8px 24px #27292318; }
+.menu-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px; background: none; border: 0; border-radius: 6px; text-align: left; font-size: 12px; font-weight: 600; }
+.menu-item:hover { background: #f6f5f1; }
 .delete-button { color: #9a6b61; }
+.text-button:has(.icon) { display: inline-flex; align-items: center; gap: 4px; }
+.icon { width: 1.3em; height: 1.3em; flex: none; }
 .empty-state { display: grid; justify-items: center; align-content: center; min-height: 55vh; text-align: center; }
-.empty-icon { display: grid; place-items: center; width: 66px; height: 66px; margin-bottom: 20px; color: #75856a; background: #edf0e8; border-radius: 21px; font-size: 29px; }
 .empty-state h2 { margin-bottom: 8px; font: 700 19px "Avenir Next", Avenir, sans-serif; }
 .empty-state p, .muted { max-width: 390px; color: #92938a; font-size: 12px; line-height: 1.7; }
 .empty-state .primary-button { margin-top: 11px; }
 .trash-note { margin: -20px 0 28px; color: #92938a; font-size: 12px; }
 .center-card { width: min(420px, calc(100% - 36px)); margin: 10vh auto; padding: 37px; background: #fff; border: 1px solid #eeede8; border-radius: 12px; box-shadow: 0 12px 45px #2927190b; }
-.auth-card .brand-mark { width: 43px; height: 43px; margin-bottom: 29px; font-size: 24px; }
+.auth-card .brand-mark { width: 43px; height: 43px; margin-bottom: 29px; font-size: 21px; }
 .auth-card .eyebrow { margin-bottom: 8px; }
 .auth-card h1 { font-size: 24px; }
 .auth-card .muted { margin: 10px 0 24px; }

@@ -1,4 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Ellipsis, Trash } from "lucide-react";
 
 type Session = {
   authenticated: boolean;
@@ -218,7 +219,7 @@ function App() {
   if (!session.authenticated) {
     return (
       <main className="center-card auth-card">
-        <div className="brand-mark">✳</div>
+        <div className="brand-mark">M</div>
         <p className="eyebrow">YOUR FAMILY, IN FOCUS</p>
         <h1>{session.can_create_first_user ? "Set up Memories" : "Welcome back"}</h1>
         <p className="muted">
@@ -260,34 +261,33 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#"><span className="brand-mark">✳</span><span>Memories</span></a>
+        <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span></a>
         <p className="side-label">LIBRARY</p>
         <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => setView("library")}>
-          <span>▦</span> All photos <span className="nav-count">{photos.length}</span>
+          All photos <span className="nav-count">{photos.length}</span>
         </button>
         <button className={`nav-item ${showTrash ? "selected" : ""}`} onClick={() => setView("trash")}>
-          <span>⌑</span> Recently deleted <span className="nav-count">{trash.length}</span>
+          Recently deleted <span className="nav-count">{trash.length}</span>
         </button>
         {session.is_admin && (
           <button className={`nav-item ${view === "family" ? "selected" : ""}`} onClick={() => setView("family")}>
-            <span>☺</span> Family accounts
+            Family accounts
           </button>
         )}
         <button className={`nav-item ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")}>
-          <span>⚙</span> My account
+          My account
         </button>
         <div className="sidebar-bottom">
           <div className="avatar">{session.username?.slice(0, 1).toUpperCase()}</div>
           <div className="user-info"><strong>{session.username}</strong><span>{session.is_admin ? "Admin" : "Family member"}</span></div>
-          <button className="icon-button" onClick={() => void logout()} aria-label="Sign out" title="Sign out">↪</button>
+          <button className="icon-button" onClick={() => void logout()} >Sign out</button>
         </div>
       </aside>
       <main className="main-content">
         <header className="topbar">
-          <div><p className="eyebrow">SHARED FAMILY LIBRARY</p><h1>{titles[view]}</h1></div>
           {view === "library" && (
             <button className="primary-button upload-button" disabled={busy} onClick={() => inputRef.current?.click()}>
-              <span>＋</span> {busy ? uploadStatus || "Uploading…" : "Upload photos"}
+              {busy ? uploadStatus || "Uploading…" : "  +  "}
             </button>
           )}
           <input ref={inputRef} className="visually-hidden" type="file" multiple accept={ACCEPTED_FILES} onChange={(event) => void uploadFiles(event.target.files)} />
@@ -322,7 +322,6 @@ function App() {
             )}
             {visiblePhotos.length === 0 ? (
               <section className="empty-state">
-                <div className="empty-icon">{showTrash ? "⌑" : "▧"}</div>
                 <h2>{showTrash ? "Trash is empty" : "Your memories start here"}</h2>
                 <p>{showTrash ? "Deleted photos will be kept here for 30 days." : "Upload photos and videos to start building your shared family library."}</p>
                 {!showTrash && <button className="primary-button" onClick={() => inputRef.current?.click()}>Choose photos</button>}
@@ -341,21 +340,20 @@ function App() {
                             <img src={photo.content_url} alt={photo.original_name} loading="lazy" />
                           )}
                           <div className="photo-details">
-                            <span className="photo-name" title={photo.original_name}>{photo.original_name}</span>
-                            <span className="photo-byline">{new Date(photo.taken_at).toLocaleDateString()} · {photo.uploaded_by}</span>
-                            <div className="photo-actions">
-                              <a className="text-button" href={photo.original_url}>Download</a>
-                              {showTrash ? (
-                                <>
-                                  <button className="text-button" onClick={() => void restore(photo.id)}>Restore</button>
-                                  {session.is_admin && (
-                                    <button className="text-button delete-button" onClick={() => void deleteForever(photo)}>Delete forever</button>
-                                  )}
-                                </>
-                              ) : (
-                                <button className="text-button delete-button" onClick={() => void moveToTrash(photo)}>Move to trash</button>
-                              )}
+                            <div className="photo-text">
+                              <span className="photo-name" title={photo.original_name}>{photo.original_name}</span>
+                              <span className="photo-byline">{new Date(photo.taken_at).toLocaleDateString()} · {photo.uploaded_by}</span>
                             </div>
+                            {showTrash ? (
+                              <div className="photo-actions">
+                                <button className="text-button" onClick={() => void restore(photo.id)}>Restore</button>
+                                {session.is_admin && (
+                                  <button className="text-button delete-button" onClick={() => void deleteForever(photo)}>Delete forever</button>
+                                )}
+                              </div>
+                            ) : (
+                              <PhotoMenu photo={photo} onMoveToTrash={() => void moveToTrash(photo)} />
+                            )}
                           </div>
                         </article>
                       ))}
@@ -367,6 +365,56 @@ function App() {
           </>
         )}
       </main>
+    </div>
+  );
+}
+
+function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () => void }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    // Close when tapping anywhere outside the menu, or on Escape.
+    function closeOnOutsideTap(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", closeOnOutsideTap);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideTap);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className="photo-menu" ref={menuRef}>
+      <button
+        className="menu-button"
+        onClick={() => setOpen(!open)}
+        aria-label={`More options for ${photo.original_name}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Ellipsis className="icon" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="menu-list" role="menu">
+          <button
+            className="menu-item delete-button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onMoveToTrash();
+            }}
+          >
+            <Trash className="icon" aria-hidden="true" /> Move to trash
+          </button>
+        </div>
+      )}
     </div>
   );
 }
