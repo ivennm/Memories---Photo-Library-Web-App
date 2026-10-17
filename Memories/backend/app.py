@@ -34,6 +34,7 @@ DISPLAY_COPY_EXTENSIONS = {"heic", "heif", "tif", "tiff"}
 DISPLAY_COPY_MAX_EDGE = 2560
 DISPLAY_COPY_DIRECTORY = "_previews"
 TRASH_RETENTION = timedelta(days=30)
+INVITE_LIFETIME = timedelta(days=7)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -60,6 +61,18 @@ CREATE TABLE IF NOT EXISTS photos (
 CREATE INDEX IF NOT EXISTS photos_timeline
     ON photos(deleted_at, taken_at DESC, uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS photos_uploader ON photos(uploaded_by);
+-- One-time sign-up links. Only a hash of each token is stored, so the database can't be used to
+-- recover a working link.
+CREATE TABLE IF NOT EXISTS invites (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    used_by INTEGER REFERENCES users(id),
+    revoked_at TEXT
+);
 """
 # Columns added after the first release, applied to existing databases on startup.
 ADDED_COLUMNS = {
@@ -109,6 +122,10 @@ def credential_error(username: str | None, password: str | None) -> str | None:
     if password is not None and len(password) > 1024:
         return "Password must be no more than 1024 characters."
     return None
+
+
+def invite_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -658,6 +675,99 @@ def create_app() -> Flask:
         # Other devices are signed out; this one stays signed in.
         session["session_version"] = user["session_version"] + 1
         return jsonify({"status": "password_changed"}), 200
+
+    def open_invite(connection: sqlite3.Connection, token: str) -> sqlite3.Row | None:
+        """An invite that can still be used: not used, not revoked and not expired."""
+        return connection.execute(
+            """
+            SELECT * FROM invites
+            WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+            """,
+            (invite_token_hash(token), iso_timestamp(utc_now())),
+        ).fetchone()
+
+    @app.get("/api/admin/invites")
+    def list_invites() -> tuple[Any, int]:
+        require_admin()
+        rows = database().execute(
+            """
+            SELECT id, created_at, expires_at FROM invites
+            WHERE used_at IS NULL AND revoked_at IS NULL AND expires_at > ?
+            ORDER BY created_at DESC
+            """,
+            (iso_timestamp(utc_now()),),
+        ).fetchall()
+        return jsonify([dict(row) for row in rows]), 200
+
+    @app.post("/api/admin/invites")
+    def create_invite() -> tuple[Any, int]:
+        admin = require_admin()
+        token = secrets.token_urlsafe(24)
+        now = utc_now()
+        connection = database()
+        cursor = connection.execute(
+            """
+            INSERT INTO invites (token_hash, created_by, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (invite_token_hash(token), admin["id"], iso_timestamp(now),
+             iso_timestamp(now + INVITE_LIFETIME)),
+        )
+        connection.commit()
+        # The token is only ever shown here; the database keeps just its hash.
+        return jsonify({
+            "id": cursor.lastrowid,
+            "path": f"/join/{token}",
+            "expires_at": iso_timestamp(now + INVITE_LIFETIME),
+        }), 201
+
+    @app.delete("/api/admin/invites/<int:invite_id>")
+    def revoke_invite(invite_id: int) -> tuple[Any, int]:
+        require_admin()
+        connection = database()
+        cursor = connection.execute(
+            "UPDATE invites SET revoked_at = ? WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL",
+            (iso_timestamp(utc_now()), invite_id),
+        )
+        connection.commit()
+        if cursor.rowcount == 0:
+            return jsonify({"error": "Invite not found."}), 404
+        return jsonify({"status": "revoked"}), 200
+
+    @app.get("/api/invites/<token>")
+    def check_invite(token: str) -> tuple[Any, int]:
+        return jsonify({"valid": open_invite(database(), token) is not None}), 200
+
+    @app.post("/api/invites/<token>/accept")
+    def accept_invite(token: str) -> tuple[Any, int]:
+        data = request_json()
+        username = str(data.get("username", "")).strip()
+        password = str(data.get("password", ""))
+        if error := credential_error(username, password):
+            return jsonify({"error": error}), 400
+        connection = database()
+        try:
+            # Claim the invite and create the account together, so a link can only ever make one account.
+            connection.execute("BEGIN IMMEDIATE")
+            invite = open_invite(connection, token)
+            if invite is None:
+                connection.rollback()
+                return jsonify({"error": "This invite link has expired or has already been used."}), 410
+            now = iso_timestamp(utc_now())
+            cursor = connection.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, generate_password_hash(password), now),
+            )
+            connection.execute(
+                "UPDATE invites SET used_at = ?, used_by = ? WHERE id = ?",
+                (now, cursor.lastrowid, invite["id"]),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            return jsonify({"error": "That username is already in use."}), 409
+        sign_in(cursor.lastrowid, 0)
+        return jsonify({"username": username}), 201
 
     @app.delete("/api/admin/users/<int:user_id>")
     def admin_remove_user(user_id: int) -> tuple[Any, int]:

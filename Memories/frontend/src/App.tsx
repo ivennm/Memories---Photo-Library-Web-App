@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { Ellipsis, Trash } from "lucide-react";
+import { CircleUser, Ellipsis, Images, Plus, Trash, Trash2, Users } from "lucide-react";
 
 type Session = {
   authenticated: boolean;
@@ -28,6 +28,12 @@ type Account = {
   created_at: string;
   removed_at: string | null;
   photo_count: number;
+};
+
+type Invite = {
+  id: number;
+  created_at: string;
+  expires_at: string;
 };
 
 type Notice = {
@@ -67,8 +73,14 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
 // iOS converts photos to JPEG unless HEIC is listed explicitly; keep the originals.
 const ACCEPTED_FILES = "image/*,video/*,.heic,.heif,image/heic,image/heif";
 
+// Invite links look like /join/<token>; the server sends the app for any page address.
+function inviteTokenFromAddress() {
+  return window.location.pathname.match(/^\/join\/([^/]+)$/)?.[1] ?? null;
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null);
+  const [inviteToken, setInviteToken] = useState(inviteTokenFromAddress);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [trash, setTrash] = useState<Photo[]>([]);
   const [view, setView] = useState<View>("library");
@@ -216,6 +228,15 @@ function App() {
     return <main className="center-card"><p>Opening your library…</p></main>;
   }
 
+  if (inviteToken) {
+    const leaveInvite = () => {
+      window.history.replaceState(null, "", "/");
+      setInviteToken(null);
+      void refresh().catch(showError);
+    };
+    return <JoinPage token={inviteToken} signedInAs={session.authenticated ? session.username : undefined} onDone={leaveInvite} />;
+  }
+
   if (!session.authenticated) {
     return (
       <main className="center-card auth-card">
@@ -251,12 +272,6 @@ function App() {
     (result[key] ??= []).push(photo);
     return result;
   }, {});
-  const titles: Record<View, string> = {
-    library: "All photos",
-    trash: "Recently deleted",
-    family: "Family accounts",
-    account: "My account",
-  };
 
   return (
     <div className="app-shell">
@@ -264,18 +279,18 @@ function App() {
         <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span></a>
         <p className="side-label">LIBRARY</p>
         <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => setView("library")}>
-          All photos <span className="nav-count">{photos.length}</span>
+          <Images className="icon" aria-hidden="true" /> All photos <span className="nav-count">{photos.length}</span>
         </button>
         <button className={`nav-item ${showTrash ? "selected" : ""}`} onClick={() => setView("trash")}>
-          Recently deleted <span className="nav-count">{trash.length}</span>
+          <Trash2 className="icon" aria-hidden="true" /> Recently deleted <span className="nav-count">{trash.length}</span>
         </button>
         {session.is_admin && (
           <button className={`nav-item ${view === "family" ? "selected" : ""}`} onClick={() => setView("family")}>
-            Family accounts
+            <Users className="icon" aria-hidden="true" /> Family accounts
           </button>
         )}
-        <button className={`nav-item ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")}>
-          My account
+        <button className={`nav-item nav-account ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")}>
+          <CircleUser className="icon" aria-hidden="true" /> My account
         </button>
         <div className="sidebar-bottom">
           <div className="avatar">{session.username?.slice(0, 1).toUpperCase()}</div>
@@ -285,11 +300,16 @@ function App() {
       </aside>
       <main className="main-content">
         <header className="topbar">
-          {view === "library" && (
-            <button className="primary-button upload-button" disabled={busy} onClick={() => inputRef.current?.click()}>
-              {busy ? uploadStatus || "Uploading…" : "  +  "}
+          <div className="topbar-actions">
+            {view === "library" && (
+              <button className="primary-button upload-button" disabled={busy} onClick={() => inputRef.current?.click()} aria-label="Upload photos" title="Upload photos">
+                {busy ? uploadStatus || "Uploading…" : <Plus className="icon" aria-hidden="true" />}
+              </button>
+            )}
+            <button className={`account-button ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")} aria-label="My account" title="My account">
+              <CircleUser className="icon" aria-hidden="true" />
             </button>
-          )}
+          </div>
           <input ref={inputRef} className="visually-hidden" type="file" multiple accept={ACCEPTED_FILES} onChange={(event) => void uploadFiles(event.target.files)} />
         </header>
         {error && <div className="error-banner">{error}<button onClick={() => setError("")}>Dismiss</button></div>}
@@ -425,12 +445,21 @@ function FamilyAccounts({ currentUsername, onChanged, onError }: {
   onError: (reason: unknown) => void;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [invites, setInvites] = useState<Invite[]>([]);
+  const [newInviteUrl, setNewInviteUrl] = useState("");
+  const [copied, setCopied] = useState(false);
+  const inviteInputRef = useRef<HTMLInputElement>(null);
   const [editing, setEditing] = useState<{ id: number; field: "password" | "username" } | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    setAccounts(await api<Account[]>("/api/admin/users"));
+    const [users, openInvites] = await Promise.all([
+      api<Account[]>("/api/admin/users"),
+      api<Invite[]>("/api/admin/invites"),
+    ]);
+    setAccounts(users);
+    setInvites(openInvites);
   }, []);
 
   useEffect(() => {
@@ -491,6 +520,38 @@ function FamilyAccounts({ currentUsername, onChanged, onError }: {
     }
   }
 
+  async function createInvite() {
+    setCopied(false);
+    await run(async () => {
+      const invite = await api<{ path: string }>("/api/admin/invites", { method: "POST" });
+      setNewInviteUrl(window.location.origin + invite.path);
+    }, "Invite link created. Send it to one family member; it works once and expires in 7 days.");
+  }
+
+  async function copyInvite() {
+    try {
+      await navigator.clipboard.writeText(newInviteUrl);
+    } catch {
+      // The clipboard API needs HTTPS; over plain HTTP, copy the selected text the older way.
+      inviteInputRef.current?.select();
+      document.execCommand("copy");
+    }
+    setCopied(true);
+  }
+
+  async function shareInvite() {
+    try {
+      await navigator.share({ title: "Join Memories", text: "Create your Memories account:", url: newInviteUrl });
+    } catch {
+      // Share sheet closed without sharing.
+    }
+  }
+
+  async function revokeInvite(invite: Invite) {
+    if (!window.confirm("Revoke this invite link? It will stop working immediately.")) return;
+    await run(() => api(`/api/admin/invites/${invite.id}`, { method: "DELETE" }), "Invite link revoked.");
+  }
+
   function toggleEditing(account: Account, field: "password" | "username") {
     setEditing(editing?.id === account.id && editing.field === field ? null : { id: account.id, field });
   }
@@ -508,6 +569,31 @@ function FamilyAccounts({ currentUsername, onChanged, onError }: {
       {message && <p className="success-note">{message}</p>}
       <section className="panel-card">
         <h2>Add a family member</h2>
+        <h3 className="panel-subheading">Invite link</h3>
+        <p className="muted">Send a link so they can choose their own username and password. Each link works once and expires after 7 days.</p>
+        {newInviteUrl ? (
+          <div className="inline-form invite-link">
+            <label>Invite link<input ref={inviteInputRef} value={newInviteUrl} readOnly onFocus={(event) => event.currentTarget.select()} /></label>
+            <button className="primary-button" type="button" onClick={() => void copyInvite()}>{copied ? "Copied" : "Copy"}</button>
+            {"share" in navigator && window.isSecureContext && (
+              <button className="primary-button" type="button" onClick={() => void shareInvite()}>Share</button>
+            )}
+            <button className="text-button" type="button" onClick={() => setNewInviteUrl("")}>Done</button>
+          </div>
+        ) : (
+          <button className="primary-button" type="button" disabled={busy} onClick={() => void createInvite()}>Create invite link</button>
+        )}
+        {invites.length > 0 && (
+          <ul className="invite-list">
+            {invites.map((invite) => (
+              <li key={invite.id}>
+                <span>Unused link · created {new Date(invite.created_at).toLocaleDateString()} · expires {new Date(invite.expires_at).toLocaleDateString()}</span>
+                <button className="text-button delete-button" onClick={() => void revokeInvite(invite)}>Revoke</button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <h3 className="panel-subheading">Or create the account yourself</h3>
         <form className="inline-form" onSubmit={addAccount}>
           <label>Username<input name="username" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} maxLength={40} required /></label>
           <label>Password<input name="password" type="password" autoComplete="new-password" minLength={12} required /></label>
@@ -620,6 +706,77 @@ function MyAccount({ username, onChanged, onError, onSignOut }: {
         <button className="text-button delete-button" onClick={onSignOut}>Sign out of this device</button>
       </section>
     </div>
+  );
+}
+
+function JoinPage({ token, signedInAs, onDone }: { token: string; signedInAs?: string; onDone: () => void }) {
+  const [valid, setValid] = useState<boolean | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api<{ valid: boolean }>(`/api/invites/${encodeURIComponent(token)}`)
+      .then((result) => setValid(result.valid))
+      .catch(() => setValid(false));
+  }, [token]);
+
+  async function join(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    if (data.get("password") !== data.get("confirm_password")) {
+      setError("The passwords don't match.");
+      return;
+    }
+    setError("");
+    setBusy(true);
+    try {
+      await api(`/api/invites/${encodeURIComponent(token)}/accept`, {
+        method: "POST",
+        body: JSON.stringify({ username: String(data.get("username") ?? "").trim(), password: String(data.get("password") ?? "") }),
+      });
+      onDone();
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 410) setValid(false);
+      else setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (valid === null) {
+    return <main className="center-card"><p>Checking your invite…</p></main>;
+  }
+
+  if (!valid) {
+    return (
+      <main className="center-card auth-card">
+        <div className="brand-mark">M</div>
+        <h1>Invite link not valid</h1>
+        <p className="muted">This invite link has expired or has already been used. Ask the admin for a new one.</p>
+        <button className="primary-button" onClick={onDone}>Go to sign in</button>
+      </main>
+    );
+  }
+
+  return (
+    <main className="center-card auth-card">
+      <div className="brand-mark">M</div>
+      <p className="eyebrow">YOU'RE INVITED</p>
+      <h1>Join Memories</h1>
+      <p className="muted">
+        Create your account for the private family photo library.
+        {signedInAs && ` You're signed in as ${signedInAs} on this device; creating an account will switch to the new one.`}
+      </p>
+      <form onSubmit={join}>
+        <label>Username<input name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} maxLength={40} required /></label>
+        <label>Password<input name="password" type="password" autoComplete="new-password" minLength={12} required /></label>
+        <label>Confirm password<input name="confirm_password" type="password" autoComplete="new-password" minLength={12} required /></label>
+        <p className="footnote">Passwords need at least 12 characters.</p>
+        {error && <p className="error">{error}</p>}
+        <button className="primary-button" disabled={busy}>{busy ? "Please wait…" : "Create my account"}</button>
+      </form>
+      <p className="footnote"><button className="text-button" onClick={onDone}>Already have an account? Sign in</button></p>
+    </main>
   );
 }
 

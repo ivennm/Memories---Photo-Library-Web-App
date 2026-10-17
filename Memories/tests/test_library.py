@@ -361,6 +361,63 @@ def test_rename_user_command(app):
     assert client.get("/api/session").json["username"] == "admin-dad"
 
 
+def create_invite_token(client):
+    response = client.post("/api/admin/invites")
+    assert response.status_code == 201
+    return response.json["path"].removeprefix("/join/")
+
+
+def test_invite_link_creates_one_account_only(client, app):
+    assert establish_first_user(client).status_code == 201
+    token = create_invite_token(client)
+    assert len(client.get("/api/admin/invites").json) == 1
+
+    guest = app.test_client()
+    assert guest.get(f"/api/invites/{token}").json == {"valid": True}
+    assert guest.post(
+        f"/api/invites/{token}/accept", json={"username": "family", "password": "a-long-password-1"}
+    ).status_code == 409
+    assert guest.post(
+        f"/api/invites/{token}/accept", json={"username": "jo", "password": "jos-long-password"}
+    ).status_code == 201
+    session = guest.get("/api/session").json
+    assert session["username"] == "jo" and session["is_admin"] is False
+
+    second = app.test_client()
+    assert second.get(f"/api/invites/{token}").json == {"valid": False}
+    assert second.post(
+        f"/api/invites/{token}/accept", json={"username": "stranger", "password": "another-long-password"}
+    ).status_code == 410
+    assert client.get("/api/admin/invites").json == []
+
+
+def test_expired_and_revoked_invites_cannot_be_used(client, app):
+    import sqlite3
+
+    assert establish_first_user(client).status_code == 201
+    expired = create_invite_token(client)
+    with sqlite3.connect(app.config["DATABASE_PATH"]) as connection:
+        connection.execute("UPDATE invites SET expires_at = '2000-01-01T00:00:00Z'")
+    revoked = create_invite_token(client)
+    invite_id = client.get("/api/admin/invites").json[0]["id"]
+    assert client.delete(f"/api/admin/invites/{invite_id}").status_code == 200
+
+    guest = app.test_client()
+    for token in (expired, revoked, "made-up-token"):
+        assert guest.post(
+            f"/api/invites/{token}/accept", json={"username": "jo", "password": "jos-long-password"}
+        ).status_code == 410
+
+
+def test_only_admin_can_create_invites(client, app):
+    assert establish_first_user(client).status_code == 201
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    assert member.post("/api/admin/invites").status_code == 403
+    assert app.test_client().post("/api/admin/invites").status_code == 401
+
+
 def test_removed_account_keeps_photo_credit_but_cannot_sign_in(client, app):
     assert establish_first_user(client).status_code == 201
     mom = make_family_member(client)

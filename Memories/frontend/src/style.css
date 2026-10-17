@@ -36,11 +36,14 @@ button:disabled { cursor: wait; opacity: .65; }
 .main-content { max-width: 1600px; margin-left: 248px; padding: 46px 54px 72px; }
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 39px; }
 .topbar .eyebrow { margin: 0 0 7px; }
+.topbar-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.account-button { display: none; place-items: center; width: 40px; height: 40px; padding: 0; color: #65775b; background: #fff; border: 1px solid #e6e5df; border-radius: 50%; font-size: 17px; }
+.account-button.selected { color: #fff; background: #65775b; border-color: #65775b; }
 h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-spacing: -1px; }
 .primary-button { padding: 11px 17px; color: #fff; background: #65775b; border: 0; border-radius: 7px; font-size: 12px; font-weight: 600; transition: background .15s; }
 .primary-button:hover { background: #526448; }
-.upload-button { display: flex; align-items: center; gap: 7px; }
+.upload-button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 40px; height: 40px; font-size: 17px; }
 .month-group { margin-bottom: 39px; }
 .month-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 17px; }
 .month-heading h2 { margin: 0; font: 700 16px "Avenir Next", Avenir, sans-serif; }
@@ -91,6 +94,13 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .family-panel { display: grid; gap: 22px; max-width: 760px; }
 .panel-card { padding: 22px 24px; background: #fff; border: 1px solid #eeede8; border-radius: 9px; }
 .panel-card h2 { margin-bottom: 16px; font: 700 15px "Avenir Next", Avenir, sans-serif; }
+.panel-subheading { margin: 18px 0 6px; font-size: 12px; font-weight: 700; }
+.panel-card h2 + .panel-subheading { margin-top: 0; }
+.panel-card .muted { margin: 0 0 12px; }
+.invite-link .text-button { align-self: center; padding: 0; font-size: 11px; }
+.invite-list { display: grid; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+.invite-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 12px; color: #6d6e66; background: #f6f5f1; border-radius: 7px; font-size: 11px; }
+.invite-list .text-button { padding: 0; font-size: 11px; }
 .inline-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
 .inline-form label { display: grid; flex: 1 1 180px; gap: 6px; font-size: 11px; font-weight: 600; }
 .inline-form input { width: 100%; padding: 10px; color: #272923; background: #fff; border: 1px solid #e6e5df; border-radius: 6px; outline: none; }
@@ -107,14 +117,16 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 
 @media (max-width: 760px) {
-  .sidebar { position: static; width: 100%; height: auto; padding: 13px 16px 9px; flex-direction: row; flex-wrap: wrap; gap: 7px; border-right: 0; border-bottom: 1px solid #ecebe6; }
-  .brand { width: 100%; margin: 0 0 4px; }
-  .side-label, .sidebar-bottom { display: none; }
-  .sidebar .nav-item { display: flex; width: auto; flex: 1; padding: 9px 7px; gap: 7px; font-size: 11px; }
-  .main-content { margin-left: 0; padding: 30px 20px 50px; }
-  .topbar { align-items: flex-end; margin-bottom: 29px; }
+  /* Phones: the sidebar becomes a tab bar fixed to the bottom of the screen. */
+  .sidebar { inset: auto 0 0 0; z-index: 20; width: 100%; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); flex-direction: row; gap: 4px; border-right: 0; border-top: 1px solid #ecebe6; }
+  .brand, .side-label, .sidebar-bottom, .nav-account, .nav-count { display: none; }
+  .sidebar .nav-item { flex: 1; flex-direction: column; justify-content: center; gap: 3px; padding: 7px 4px; font-size: 10px; text-align: center; }
+  .sidebar .nav-item .icon { width: 22px; height: 22px; }
+  .main-content { margin-left: 0; padding: calc(16px + env(safe-area-inset-top)) 16px calc(90px + env(safe-area-inset-bottom)); }
+  .topbar { margin-bottom: 20px; }
+  .account-button { display: grid; }
   h1 { font-size: 25px; }
-  .upload-button { padding: 10px 11px; font-size: 11px; }
+  .upload-button { padding: 0 11px; font-size: 17px; }
   .photo-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 10px; }
   .photo-card > img, .photo-card > video { height: 145px; }
 }

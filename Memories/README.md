@@ -19,7 +19,8 @@ A private, self-hosted photo and video library for family members on your Tailsc
 
 - The first account, created in the browser on first launch, is the **admin**. It is the only admin.
 - Everyone has a **My account** page to change their own username or password (current password required; changing the password signs out their other devices).
-- The admin's **Family accounts** page adds accounts, renames them, resets passwords, and removes accounts. Resetting a password or removing an account signs that person out on every device. Removed accounts cannot sign in, but their photos stay in the library, still credited to them.
+- The admin's **Family accounts** page adds accounts, renames them, resets passwords, and removes accounts.
+- The admin can also create an **invite link** (`/join/<code>`) so a family member sets up their own account. Each link creates one account only, expires after 7 days, and can be revoked while unused. Only a hash of the link's code is stored. The person still needs to be on the tailnet to open it. Resetting a password or removing an account signs that person out on every device. Removed accounts cannot sign in, but their photos stay in the library, still credited to them.
 - Everyone can upload and move items to the trash; anyone can restore. Only the admin can **Delete forever** from the trash before the 30 days are up.
 - Server-side recovery commands, including for a forgotten admin username or password:
 
