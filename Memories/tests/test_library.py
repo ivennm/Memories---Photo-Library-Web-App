@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from PIL import ExifTags, Image
@@ -24,6 +25,40 @@ def app(tmp_path, monkeypatch):
 @pytest.fixture()
 def client(app):
     return app.test_client()
+
+
+def test_app_refuses_to_start_when_media_drive_is_not_mounted(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "db" / "library.sqlite3"))
+    monkeypatch.setenv("MEDIA_MOUNT", str(tmp_path / "drive"))
+    monkeypatch.setenv("MEDIA_ROOT", str(tmp_path / "drive" / "library"))
+    with pytest.raises(RuntimeError, match="not mounted"):
+        create_app()
+    assert not (tmp_path / "drive").exists()
+
+
+def test_media_root_must_be_on_the_media_drive(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "db" / "library.sqlite3"))
+    monkeypatch.setenv("MEDIA_MOUNT", str(tmp_path / "drive"))
+    monkeypatch.setenv("MEDIA_ROOT", str(tmp_path / "elsewhere"))
+    monkeypatch.setattr("os.path.ismount", lambda path: True)
+    with pytest.raises(RuntimeError, match="must be inside"):
+        create_app()
+
+
+def test_uploads_are_refused_if_media_drive_disappears(tmp_path, monkeypatch):
+    drive = tmp_path / "drive"
+    mounted = {"value": True}
+    monkeypatch.setattr("os.path.ismount", lambda path: mounted["value"] and Path(path) == drive)
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "db" / "library.sqlite3"))
+    monkeypatch.setenv("MEDIA_MOUNT", str(drive))
+    monkeypatch.setenv("MEDIA_ROOT", str(drive / "library"))
+    client = create_app().test_client()
+    assert establish_first_user(client).status_code == 201
+
+    mounted["value"] = False
+    response = upload(client, b"sample image bytes", "beach.jpg")
+    assert response.status_code == 503
+    assert list((drive / "library").iterdir()) == []
 
 
 def establish_first_user(client):
@@ -234,6 +269,96 @@ def test_admin_resets_password_and_signs_out_old_sessions(client, app):
     assert member.post(
         "/api/login", json={"username": "mom", "password": "a-brand-new-password"}
     ).status_code == 200
+
+
+def test_member_changes_own_password_and_other_devices_sign_out(client, app):
+    assert establish_first_user(client).status_code == 201
+    make_family_member(client)
+    phone, laptop = app.test_client(), app.test_client()
+    for device in (phone, laptop):
+        device.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+
+    assert phone.post(
+        "/api/account/password",
+        json={"current_password": "wrong-password", "new_password": "a-brand-new-password"},
+    ).status_code == 403
+    assert phone.post(
+        "/api/account/password",
+        json={"current_password": "moms-long-password", "new_password": "short"},
+    ).status_code == 400
+    assert phone.post(
+        "/api/account/password",
+        json={"current_password": "moms-long-password", "new_password": "a-brand-new-password"},
+    ).status_code == 200
+
+    assert phone.get("/api/photos").status_code == 200
+    assert laptop.get("/api/photos").status_code == 401
+    assert laptop.post(
+        "/api/login", json={"username": "mom", "password": "a-brand-new-password"}
+    ).status_code == 200
+
+
+def test_member_changes_own_username_and_keeps_photo_credit(client, app):
+    assert establish_first_user(client).status_code == 201
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    assert upload(member, b"mom's photo", "garden.jpg").status_code == 201
+
+    assert member.post(
+        "/api/account/username", json={"current_password": "nope", "username": "mama"}
+    ).status_code == 403
+    assert member.post(
+        "/api/account/username",
+        json={"current_password": "moms-long-password", "username": "FAMILY"},
+    ).status_code == 409
+    assert member.post(
+        "/api/account/username",
+        json={"current_password": "moms-long-password", "username": "mama"},
+    ).status_code == 200
+
+    assert member.get("/api/session").json["username"] == "mama"
+    assert client.get("/api/photos").json[0]["uploaded_by"] == "mama"
+    assert app.test_client().post(
+        "/api/login", json={"username": "mama", "password": "moms-long-password"}
+    ).status_code == 200
+
+
+def test_only_admin_can_rename_other_accounts(client, app):
+    assert establish_first_user(client).status_code == 201
+    mom = make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+
+    assert member.post(
+        f"/api/admin/users/{mom['id']}/username", json={"username": "mama"}
+    ).status_code == 403
+    assert client.post(
+        f"/api/admin/users/{mom['id']}/username", json={"username": "x"}
+    ).status_code == 400
+    assert client.post(
+        f"/api/admin/users/{mom['id']}/username", json={"username": "ma"}
+    ).status_code == 200
+    assert client.post(
+        f"/api/admin/users/{mom['id']}/username", json={"username": "mama"}
+    ).status_code == 200
+    assert member.get("/api/session").json["username"] == "mama"
+
+
+def test_rename_user_command(app):
+    import builtins
+
+    client = app.test_client()
+    assert establish_first_user(client).status_code == 201
+    answers = iter(["family", "admin-dad"])
+    original_input = builtins.input
+    builtins.input = lambda prompt="": next(answers)
+    try:
+        result = app.test_cli_runner().invoke(args=["rename-user"])
+    finally:
+        builtins.input = original_input
+    assert "Renamed family to admin-dad." in result.output
+    assert client.get("/api/session").json["username"] == "admin-dad"
 
 
 def test_removed_account_keeps_photo_credit_but_cannot_sign_in(client, app):

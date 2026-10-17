@@ -35,7 +35,7 @@ type Notice = {
   restorePhotoId?: string;
 };
 
-type View = "library" | "trash" | "family";
+type View = "library" | "trash" | "family" | "account";
 
 class ApiError extends Error {
   constructor(
@@ -227,13 +227,16 @@ function App() {
             : "Sign in to your private family photo library."}
         </p>
         <form onSubmit={submitCredentials}>
-          <label>Username<input name="username" autoComplete="username" minLength={3} required /></label>
+          <label>Username<input name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} required /></label>
           <label>Password<input name="password" type="password" autoComplete={session.can_create_first_user ? "new-password" : "current-password"} minLength={session.can_create_first_user ? 12 : undefined} required /></label>
           {error && <p className="error">{error}</p>}
           <button className="primary-button" disabled={busy}>
             {busy ? "Please wait…" : session.can_create_first_user ? "Create admin account" : "Sign in"}
           </button>
         </form>
+        {!session.can_create_first_user && (
+          <p className="footnote">Forgot your username or password? Ask the admin to reset it from Family accounts.</p>
+        )}
         <p className="footnote">Private access for your family over Tailscale.</p>
       </main>
     );
@@ -251,6 +254,7 @@ function App() {
     library: "All photos",
     trash: "Recently deleted",
     family: "Family accounts",
+    account: "My account",
   };
 
   return (
@@ -269,6 +273,9 @@ function App() {
             <span>☺</span> Family accounts
           </button>
         )}
+        <button className={`nav-item ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")}>
+          <span>⚙</span> My account
+        </button>
         <div className="sidebar-bottom">
           <div className="avatar">{session.username?.slice(0, 1).toUpperCase()}</div>
           <div className="user-info"><strong>{session.username}</strong><span>{session.is_admin ? "Admin" : "Family member"}</span></div>
@@ -301,8 +308,10 @@ function App() {
             ))}
           </div>
         )}
-        {view === "family" ? (
-          <FamilyAccounts currentUsername={session.username ?? ""} onError={showError} />
+        {view === "account" ? (
+          <MyAccount username={session.username ?? ""} onChanged={refresh} onError={showError} onSignOut={() => void logout()} />
+        ) : view === "family" ? (
+          <FamilyAccounts currentUsername={session.username ?? ""} onChanged={refresh} onError={showError} />
         ) : (
           <>
             {showTrash && (
@@ -362,9 +371,13 @@ function App() {
   );
 }
 
-function FamilyAccounts({ currentUsername, onError }: { currentUsername: string; onError: (reason: unknown) => void }) {
+function FamilyAccounts({ currentUsername, onChanged, onError }: {
+  currentUsername: string;
+  onChanged: () => Promise<void>;
+  onError: (reason: unknown) => void;
+}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [resettingId, setResettingId] = useState<number | null>(null);
+  const [editing, setEditing] = useState<{ id: number; field: "password" | "username" } | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -414,7 +427,24 @@ function FamilyAccounts({ currentUsername, onError }: { currentUsername: string;
       () => api(`/api/admin/users/${account.id}/password`, { method: "POST", body: JSON.stringify({ password }) }),
       `Password reset for ${account.username}. They have been signed out on all devices.`,
     );
-    if (reset) setResettingId(null);
+    if (reset) setEditing(null);
+  }
+
+  async function renameAccount(event: FormEvent<HTMLFormElement>, account: Account) {
+    event.preventDefault();
+    const username = String(new FormData(event.currentTarget).get("username") ?? "").trim();
+    const renamed = await run(
+      () => api(`/api/admin/users/${account.id}/username`, { method: "POST", body: JSON.stringify({ username }) }),
+      `Renamed ${account.username} to ${username}. They sign in with the new username from now on.`,
+    );
+    if (renamed) {
+      setEditing(null);
+      if (account.username === currentUsername) await onChanged();
+    }
+  }
+
+  function toggleEditing(account: Account, field: "password" | "username") {
+    setEditing(editing?.id === account.id && editing.field === field ? null : { id: account.id, field });
   }
 
   async function removeAccount(account: Account) {
@@ -431,7 +461,7 @@ function FamilyAccounts({ currentUsername, onError }: { currentUsername: string;
       <section className="panel-card">
         <h2>Add a family member</h2>
         <form className="inline-form" onSubmit={addAccount}>
-          <label>Username<input name="username" autoComplete="off" minLength={3} maxLength={40} required /></label>
+          <label>Username<input name="username" autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} maxLength={40} required /></label>
           <label>Password<input name="password" type="password" autoComplete="new-password" minLength={12} required /></label>
           <button className="primary-button" disabled={busy}>Add account</button>
         </form>
@@ -452,14 +482,21 @@ function FamilyAccounts({ currentUsername, onError }: { currentUsername: string;
                 </div>
                 {!account.removed_at && (
                   <span className="account-actions">
-                    <button className="text-button" onClick={() => setResettingId(resettingId === account.id ? null : account.id)}>Reset password</button>
+                    <button className="text-button" onClick={() => toggleEditing(account, "username")}>Rename</button>
+                    <button className="text-button" onClick={() => toggleEditing(account, "password")}>Reset password</button>
                     {!account.is_admin && (
                       <button className="text-button delete-button" onClick={() => void removeAccount(account)}>Remove</button>
                     )}
                   </span>
                 )}
               </div>
-              {resettingId === account.id && (
+              {editing?.id === account.id && editing.field === "username" && (
+                <form className="inline-form" onSubmit={(event) => void renameAccount(event, account)}>
+                  <label>New username for {account.username}<input name="username" defaultValue={account.username} autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} maxLength={40} required autoFocus /></label>
+                  <button className="primary-button" disabled={busy}>Save username</button>
+                </form>
+              )}
+              {editing?.id === account.id && editing.field === "password" && (
                 <form className="inline-form" onSubmit={(event) => void resetPassword(event, account)}>
                   <label>New password for {account.username}<input name="password" type="password" autoComplete="new-password" minLength={12} required autoFocus /></label>
                   <button className="primary-button" disabled={busy}>Set password</button>
@@ -468,6 +505,71 @@ function FamilyAccounts({ currentUsername, onError }: { currentUsername: string;
             </li>
           ))}
         </ul>
+      </section>
+    </div>
+  );
+}
+
+function MyAccount({ username, onChanged, onError, onSignOut }: {
+  username: string;
+  onChanged: () => Promise<void>;
+  onError: (reason: unknown) => void;
+  onSignOut: () => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [formError, setFormError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>, url: string, success: (data: FormData) => string) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    if (data.has("confirm_password") && data.get("confirm_password") !== data.get("new_password")) {
+      setMessage("");
+      setFormError("The new passwords don't match.");
+      return;
+    }
+    setMessage("");
+    setFormError("");
+    setBusy(true);
+    try {
+      await api(url, { method: "POST", body: JSON.stringify(Object.fromEntries(data)) });
+      setMessage(success(data));
+      form.reset();
+      await onChanged();
+    } catch (reason) {
+      // Wrong current password or a taken username is shown here; a signed-out session is handled by the app.
+      if (reason instanceof ApiError && reason.status !== 401) setFormError(reason.message);
+      else onError(reason);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="family-panel">
+      {message && <p className="success-note">{message}</p>}
+      {formError && <p className="error">{formError}</p>}
+      <section className="panel-card">
+        <h2>Change username</h2>
+        <form className="inline-form" onSubmit={(event) => void submit(event, "/api/account/username", (data) => `Your username is now ${String(data.get("username")).trim()}. Use it the next time you sign in.`)}>
+          <label>New username<input name="username" placeholder={username} autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} maxLength={40} required /></label>
+          <label>Current password<input name="current_password" type="password" autoComplete="current-password" required /></label>
+          <button className="primary-button" disabled={busy}>Save username</button>
+        </form>
+      </section>
+      <section className="panel-card">
+        <h2>Change password</h2>
+        <form className="inline-form" onSubmit={(event) => void submit(event, "/api/account/password", () => "Password changed. Your other devices have been signed out.")}>
+          <label>Current password<input name="current_password" type="password" autoComplete="current-password" required /></label>
+          <label>New password<input name="new_password" type="password" autoComplete="new-password" minLength={12} required /></label>
+          <label>Confirm new password<input name="confirm_password" type="password" autoComplete="new-password" minLength={12} required /></label>
+          <button className="primary-button" disabled={busy}>Change password</button>
+        </form>
+      </section>
+      <section className="panel-card">
+        <h2>Signed in as {username}</h2>
+        <button className="text-button delete-button" onClick={onSignOut}>Sign out of this device</button>
       </section>
     </div>
   );

@@ -52,14 +52,20 @@ SAFETY
 12. Periodic integrity check: re-hash originals and compare to the stored SHA-256.
 
 
-EXTERNAL DRIVE (when it arrives)
---------------------------------
+MEDIA DRIVE (1 TB HDD installed 2026-10-16)
+-------------------------------------------
 
-13. Mount the 2 TB drive persistently (/etc/fstab).
+13. DONE: drive mounted persistently at /mnt/drive-2 (fstab, by UUID, nofail).
+    Code/units now use MEDIA_MOUNT=/mnt/drive-2, MEDIA_ROOT=/mnt/drive-2/memories/library,
+    RequiresMountsFor and ReadWritePaths. Test library copied there and hash-verified.
+    Verified 2026-10-16: a live upload through Gunicorn was written to /dev/sda1 (WD 1 TB)
+    with a matching SHA-256 and nothing written to the OS disk.
 
-14. Move the library: stop app, copy MEDIA_ROOT, verify hashes, update MEDIA_ROOT and
-    ReadWritePaths in the systemd units, start app, confirm, then remove the old copy.
-    (Optional: a guided migration command that does the copy + verify.)
+14. DONE 2026-10-16: test run from the drive confirmed on the MacBook (photos loaded, new upload
+    saved to /dev/sda1). Old copy in Memories/data/library deleted from the OS drive.
+    Still to do: confirm on the iPhone (it opened the site but hadn't signed in/loaded photos yet).
+    At deploy (item 3), copy data/photolibrary.sqlite3 to /var/lib/memories if keeping test data,
+    and chown -R memories:memories /mnt/drive-2/memories.
 
 
 FEATURES
@@ -75,6 +81,7 @@ FEATURES
 
 19. Favorites and tags; search.
 
-20. Let each person change their own password.
+20. DONE 2026-10-16: My account page (change own username/password), admin Rename on Family
+    accounts, "forgot password" hint on sign-in, `flask rename-user` server command.
 
 21. Near-duplicate detection (resized/recompressed copies), beyond exact-file matching.

@@ -7,7 +7,7 @@ A private, self-hosted photo and video library for family members on your Tailsc
 - React + TypeScript + Vite frontend, built to static files.
 - Python Flask JSON API, served in production by Gunicorn. Gunicorn also serves the built frontend, so the whole site is on one local port.
 - SQLite for accounts and media metadata.
-- Original media in `MEDIA_ROOT`, separate from the app code and configurable for the future external drive.
+- Original media in `MEDIA_ROOT`, on the dedicated 1 TB media drive (`/mnt/drive-2`), separate from the OS disk and the app code.
 
 **Dates.** Photo dates come from EXIF, including the timezone offset iPhones record; photos without an offset are assumed to be in the server's timezone. Upload time is used when there is no EXIF date (currently always the case for videos). All timestamps are stored in UTC. Files are placed under `MEDIA_ROOT/YYYY/MM/` by the local date the photo was taken.
 
@@ -18,13 +18,15 @@ A private, self-hosted photo and video library for family members on your Tailsc
 ## Accounts
 
 - The first account, created in the browser on first launch, is the **admin**. It is the only admin.
-- The admin's **Family accounts** page adds accounts, resets passwords, and removes accounts. Resetting a password or removing an account signs that person out on every device. Removed accounts cannot sign in, but their photos stay in the library, still credited to them.
+- Everyone has a **My account** page to change their own username or password (current password required; changing the password signs out their other devices).
+- The admin's **Family accounts** page adds accounts, renames them, resets passwords, and removes accounts. Resetting a password or removing an account signs that person out on every device. Removed accounts cannot sign in, but their photos stay in the library, still credited to them.
 - Everyone can upload and move items to the trash; anyone can restore. Only the admin can **Delete forever** from the trash before the 30 days are up.
-- Server-side recovery commands, including for a forgotten admin password:
+- Server-side recovery commands, including for a forgotten admin username or password:
 
 ```sh
 flask --app backend.app:create_app create-user
 flask --app backend.app:create_app reset-password
+flask --app backend.app:create_app rename-user
 ```
 
 ## Requirements
@@ -69,7 +71,8 @@ Run Gunicorn under `systemd` (not Flask's development server) and publish it on 
 
    ```sh
    sudo useradd --system --home-dir /opt/memories --shell /usr/sbin/nologin memories
-   sudo install -d -o memories -g memories /var/lib/memories /srv/memories
+   sudo install -d -o memories -g memories /var/lib/memories /mnt/drive-2/memories
+   sudo chown -R memories:memories /mnt/drive-2/memories   # includes any library already copied there
    sudo cp -r . /opt/memories   # from this project folder
    cd /opt/memories
    sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
@@ -82,7 +85,8 @@ Run Gunicorn under `systemd` (not Flask's development server) and publish it on 
    APP_ENV=production
    SECRET_KEY=replace-with-a-long-random-secret
    DATABASE_PATH=/var/lib/memories/photolibrary.sqlite3
-   MEDIA_ROOT=/srv/memories/library
+   MEDIA_MOUNT=/mnt/drive-2
+   MEDIA_ROOT=/mnt/drive-2/memories/library
    MAX_UPLOAD_MB=2048
    SESSION_COOKIE_SECURE=true
    ```
@@ -112,9 +116,18 @@ To update the app later: copy the new code to `/opt/memories`, reinstall require
 
 Back up both the SQLite database and `MEDIA_ROOT`. The database holds the accounts, metadata and relative file paths; the media files are the irreplaceable originals.
 
-## Moving to the external drive
+## Media drive
 
-When the drive is installed and mounted persistently (via `/etc/fstab`), stop the app, copy the contents of `MEDIA_ROOT` to the new library directory, verify the copy (the database stores each original's SHA-256), update `MEDIA_ROOT` and `ReadWritePaths` in the systemd units, then start the app and confirm the library before removing the old copy. Keep `DATABASE_PATH` on the server's internal storage and back it up separately. Do not change `MEDIA_ROOT` alone while files remain at the old location.
+Originals live on the dedicated 1 TB HDD (`/dev/sda1`, ext4, label `drive-2`), not on the OS disk. It is mounted at `/mnt/drive-2` by UUID in `/etc/fstab` with `nofail`, so the server still boots if the drive is missing. Device names (`sda`/`sdb`) can swap between boots; always refer to the drive by UUID or label.
+
+Because a missing drive leaves an empty `/mnt/drive-2` folder on the OS disk, two guards keep media off the OS disk:
+
+- `MEDIA_MOUNT=/mnt/drive-2` makes the app refuse to start unless that path is a mounted drive and `MEDIA_ROOT` is inside it, and refuses uploads and permanent deletes (HTTP 503) if the drive disappears while running.
+- The systemd units have `RequiresMountsFor=/mnt/drive-2`, so they do not start until the drive is mounted.
+
+`DATABASE_PATH` stays on the server's internal storage (`/var/lib/memories`); back it up separately.
+
+To move the library to another drive later: stop the app, copy the contents of `MEDIA_ROOT` to the new location, verify the copy (the database stores each original's SHA-256), update `MEDIA_MOUNT`, `MEDIA_ROOT`, `RequiresMountsFor` and `ReadWritePaths`, then start the app and confirm the library before removing the old copy. Do not change `MEDIA_ROOT` alone while files remain at the old location.
 
 ## Current boundaries
 
