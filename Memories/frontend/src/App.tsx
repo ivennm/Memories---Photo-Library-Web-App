@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { CircleUser, Ellipsis, Images, Plus, Trash, Trash2, Users } from "lucide-react";
+import { CircleUser, Download, Ellipsis, Images, LoaderCircle, Plus, Trash, Trash2, Users } from "lucide-react";
 
 type Session = {
   authenticated: boolean;
@@ -19,6 +19,8 @@ type Photo = {
   deleted_at: string | null;
   content_url: string;
   original_url: string;
+  thumbnail_url: string | null;
+  processing: "pending" | "done" | "failed";
 };
 
 type Account = {
@@ -118,6 +120,13 @@ function App() {
   useEffect(() => {
     void refresh().catch(showError);
   }, [refresh, showError]);
+
+  // New uploads get thumbnails and video streaming copies in the background; check back until done.
+  useEffect(() => {
+    if (!photos.some((photo) => photo.processing === "pending")) return;
+    const timer = window.setTimeout(() => void refresh().catch(showError), 10000);
+    return () => window.clearTimeout(timer);
+  }, [photos, refresh, showError]);
 
   async function submitCredentials(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -276,7 +285,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span></a>
+        <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span><span className="app-version">v{__APP_VERSION__}</span></a>
         <p className="side-label">LIBRARY</p>
         <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => setView("library")}>
           <Images className="icon" aria-hidden="true" /> All photos <span className="nav-count">{photos.length}</span>
@@ -300,6 +309,7 @@ function App() {
       </aside>
       <main className="main-content">
         <header className="topbar">
+          <span className="app-version topbar-version">Memories v{__APP_VERSION__}</span>
           <div className="topbar-actions">
             {view === "library" && (
               <button className="primary-button upload-button" disabled={busy} onClick={() => inputRef.current?.click()} aria-label="Upload photos" title="Upload photos">
@@ -355,9 +365,19 @@ function App() {
                       {items.map((photo) => (
                         <article className="photo-card" key={photo.id}>
                           {photo.content_type.startsWith("video/") ? (
-                            <video src={photo.content_url} controls preload="metadata" />
+                            // With a poster, nothing downloads until play is pressed.
+                            <video
+                              src={photo.content_url}
+                              poster={photo.thumbnail_url ?? undefined}
+                              controls
+                              playsInline
+                              preload={photo.thumbnail_url ? "none" : "metadata"}
+                            />
                           ) : (
-                            <img src={photo.content_url} alt={photo.original_name} loading="lazy" />
+                            <img src={photo.thumbnail_url ?? photo.content_url} alt={photo.original_name} loading="lazy" />
+                          )}
+                          {photo.processing === "pending" && photo.content_type.startsWith("video/") && (
+                            <span className="processing-badge">Processing…</span>
                           )}
                           <div className="photo-details">
                             <div className="photo-text">
@@ -389,18 +409,83 @@ function App() {
   );
 }
 
+// Phones and tablets on HTTPS can hand the original file to the share sheet, whose "Save Video" /
+// "Save Image" puts it straight into Photos. Computers (and plain HTTP) download it instead.
+const canSaveToPhotos =
+  window.isSecureContext && typeof navigator.canShare === "function" && navigator.maxTouchPoints > 1;
+// The share sheet needs the whole file in memory first; bigger files are downloaded instead.
+const SHARE_SIZE_LIMIT = 500 * 1024 * 1024;
+
+function downloadOriginal(photo: Photo) {
+  const link = document.createElement("a");
+  link.href = photo.original_url;
+  link.download = photo.original_name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+type SaveState = { step: "idle" } | { step: "preparing" } | { step: "ready"; file: File };
+
 function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () => void }) {
   const [open, setOpen] = useState(false);
+  const [save, setSave] = useState<SaveState>({ step: "idle" });
   const menuRef = useRef<HTMLDivElement>(null);
+  const fetchRef = useRef<AbortController | null>(null);
+
+  const close = useCallback(() => {
+    fetchRef.current?.abort();
+    fetchRef.current = null;
+    setSave({ step: "idle" });
+    setOpen(false);
+  }, []);
+
+  // Returns false when Safari refused because the tap that started the save was too long ago.
+  async function share(file: File) {
+    try {
+      await navigator.share({ files: [file] });
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "NotAllowedError") return false;
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) downloadOriginal(photo);
+    }
+    return true;
+  }
+
+  async function saveToDevice() {
+    if (!canSaveToPhotos || photo.size_bytes > SHARE_SIZE_LIMIT) {
+      downloadOriginal(photo);
+      close();
+      return;
+    }
+    const controller = new AbortController();
+    fetchRef.current = controller;
+    setSave({ step: "preparing" });
+    try {
+      const response = await fetch(photo.original_url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`Download failed (${response.status}).`);
+      const file = new File([await response.blob()], photo.original_name, { type: photo.content_type });
+      if (!navigator.canShare({ files: [file] })) {
+        downloadOriginal(photo);
+      } else if (!(await share(file))) {
+        // Downloading took long enough that Safari wants a fresh tap before opening the share sheet.
+        setSave({ step: "ready", file });
+        return;
+      }
+    } catch (reason) {
+      if (controller.signal.aborted) return;
+      downloadOriginal(photo);
+    }
+    close();
+  }
 
   useEffect(() => {
     if (!open) return;
     // Close when tapping anywhere outside the menu, or on Escape.
     function closeOnOutsideTap(event: PointerEvent) {
-      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!menuRef.current?.contains(event.target as Node)) close();
     }
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") close();
     }
     document.addEventListener("pointerdown", closeOnOutsideTap);
     document.addEventListener("keydown", closeOnEscape);
@@ -408,13 +493,13 @@ function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () =
       document.removeEventListener("pointerdown", closeOnOutsideTap);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [open]);
+  }, [open, close]);
 
   return (
     <div className="photo-menu" ref={menuRef}>
       <button
         className="menu-button"
-        onClick={() => setOpen(!open)}
+        onClick={() => (open ? close() : setOpen(true))}
         aria-label={`More options for ${photo.original_name}`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -423,11 +508,24 @@ function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () =
       </button>
       {open && (
         <div className="menu-list" role="menu">
+          {save.step === "ready" ? (
+            <button className="menu-item" role="menuitem" onClick={() => void share(save.file).then(close)}>
+              <Download className="icon" aria-hidden="true" /> Tap to save
+            </button>
+          ) : (
+            <button className="menu-item" role="menuitem" disabled={save.step === "preparing"} onClick={() => void saveToDevice()}>
+              {save.step === "preparing" ? (
+                <><LoaderCircle className="icon spin" aria-hidden="true" /> Preparing…</>
+              ) : (
+                <><Download className="icon" aria-hidden="true" /> {canSaveToPhotos ? "Save to Photos" : "Download"}</>
+              )}
+            </button>
+          )}
           <button
             className="menu-item delete-button"
             role="menuitem"
             onClick={() => {
-              setOpen(false);
+              close();
               onMoveToTrash();
             }}
           >
@@ -684,6 +782,7 @@ function MyAccount({ username, onChanged, onError, onSignOut }: {
     <div className="family-panel">
       {message && <p className="success-note">{message}</p>}
       {formError && <p className="error">{formError}</p>}
+      <StorageCard />
       <section className="panel-card">
         <h2>Change username</h2>
         <form className="inline-form" onSubmit={(event) => void submit(event, "/api/account/username", (data) => `Your username is now ${String(data.get("username")).trim()}. Use it the next time you sign in.`)}>
@@ -706,6 +805,75 @@ function MyAccount({ username, onChanged, onError, onSignOut }: {
         <button className="text-button delete-button" onClick={onSignOut}>Sign out of this device</button>
       </section>
     </div>
+  );
+}
+
+type StorageUsage = {
+  drive: { total_bytes: number; used_bytes: number; free_bytes: number };
+  library_bytes: number;
+  library_items: number;
+  trash_bytes: number;
+  trash_items: number;
+  my_bytes: number;
+  my_items: number;
+};
+
+// Decimal units, like drive makers use, so the 1 TB drive shows as about 1 TB.
+function formatBytes(bytes: number) {
+  const units = ["bytes", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value < 10 && unit > 0 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+function itemCount(count: number) {
+  return `${count} ${count === 1 ? "item" : "items"}`;
+}
+
+function StorageCard() {
+  const [usage, setUsage] = useState<StorageUsage | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api<StorageUsage>("/api/storage")
+      .then(setUsage)
+      .catch((reason: Error) => setError(reason.message));
+  }, []);
+
+  if (error) {
+    return <section className="panel-card"><h2>Storage</h2><p className="error">{error}</p></section>;
+  }
+  if (!usage) {
+    return <section className="panel-card"><h2>Storage</h2><p className="muted">Checking the photo drive…</p></section>;
+  }
+
+  const { total_bytes: total, used_bytes: used, free_bytes: free } = usage.drive;
+  const memoriesBytes = usage.library_bytes + usage.trash_bytes;
+  const percent = (bytes: number) => `${Math.min(100, (bytes / total) * 100)}%`;
+  const usedPercent = Math.round((used / total) * 100);
+
+  return (
+    <section className="panel-card">
+      <h2>Storage</h2>
+      <p className="storage-headline">
+        <strong>{formatBytes(used)}</strong> of {formatBytes(total)} used · {formatBytes(free)} free
+      </p>
+      <div className="storage-bar" role="img" aria-label={`Photo drive ${usedPercent}% full`}>
+        <span className="storage-memories" style={{ width: percent(memoriesBytes) }} />
+        <span className="storage-other" style={{ width: percent(Math.max(0, used - memoriesBytes)) }} />
+      </div>
+      <ul className="storage-legend">
+        <li><span className="swatch storage-memories" />Memories library: {formatBytes(usage.library_bytes)} ({itemCount(usage.library_items)})</li>
+        <li><span className="swatch storage-memories trash" />Recently deleted: {formatBytes(usage.trash_bytes)} ({itemCount(usage.trash_items)})</li>
+        <li><span className="swatch storage-other" />Other files and drive overhead: {formatBytes(Math.max(0, used - memoriesBytes))}</li>
+        <li>Your uploads: {formatBytes(usage.my_bytes)} ({itemCount(usage.my_items)})</li>
+      </ul>
+      <p className="footnote storage-note">Photos and videos are stored on the server's 1 TB drive. Items in Recently deleted still use space until they're removed after 30 days.</p>
+    </section>
   );
 }
 

@@ -361,6 +361,26 @@ def test_rename_user_command(app):
     assert client.get("/api/session").json["username"] == "admin-dad"
 
 
+def test_storage_reports_drive_library_trash_and_own_uploads(client, app):
+    assert app.test_client().get("/api/storage").status_code == 401
+    assert establish_first_user(client).status_code == 201
+    assert upload(client, b"x" * 1000, "one.jpg").status_code == 201
+    assert upload(client, b"y" * 500, "two.jpg").status_code == 201
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    assert upload(member, b"z" * 200, "moms.jpg").status_code == 201
+    trashed = next(p for p in client.get("/api/photos").json if p["original_name"] == "two.jpg")
+    assert client.delete(f"/api/photos/{trashed['id']}").status_code == 200
+
+    usage = client.get("/api/storage").json
+    assert usage["drive"]["total_bytes"] > 0
+    assert usage["drive"]["used_bytes"] + usage["drive"]["free_bytes"] <= usage["drive"]["total_bytes"]
+    assert (usage["library_bytes"], usage["library_items"]) == (1200, 2)
+    assert (usage["trash_bytes"], usage["trash_items"]) == (500, 1)
+    assert (usage["my_bytes"], usage["my_items"]) == (1000, 1)
+
+
 def create_invite_token(client):
     response = client.post("/api/admin/invites")
     assert response.status_code == 201

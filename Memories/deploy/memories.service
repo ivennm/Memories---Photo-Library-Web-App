@@ -1,7 +1,11 @@
 [Unit]
 Description=Memories family photo library
 RequiresMountsFor=/mnt/drive-2
-After=network.target
+# Listens on the Tailscale address by default, so start after Tailscale and keep retrying
+# until its address is ready at boot.
+Wants=tailscaled.service
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -9,7 +13,7 @@ User=memories
 Group=memories
 WorkingDirectory=/opt/memories
 EnvironmentFile=/etc/memories.env
-ExecStart=/opt/memories/.venv/bin/gunicorn --worker-class gthread --workers 2 --threads 8 --timeout 120 --bind 127.0.0.1:8000 --access-logfile - --error-logfile - "backend.app:create_app()"
+ExecStart=/opt/memories/.venv/bin/gunicorn --worker-class gthread --workers 2 --threads 8 --timeout 120 --bind ${MEMORIES_BIND} --access-logfile - --error-logfile - "backend.app:create_app()"
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

@@ -5,18 +5,22 @@ import logging
 import mimetypes
 import os
 import secrets
+import shutil
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import click
 import pillow_heif
 from flask import Flask, abort, g, jsonify, request, send_file, send_from_directory, session
 from PIL import ExifTags, Image, ImageOps
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+
+from . import media
 
 pillow_heif.register_heif_opener()
 mimetypes.add_type("image/heic", ".heic")
@@ -81,7 +85,13 @@ ADDED_COLUMNS = {
         "removed_at": "TEXT",
         "session_version": "INTEGER NOT NULL DEFAULT 0",
     },
-    "photos": {"display_path": "TEXT"},
+    "photos": {
+        "display_path": "TEXT",
+        "thumb_path": "TEXT",
+        "stream_path": "TEXT",
+        # Existing items start as pending, so the worker backfills their thumbnails and copies.
+        "processing": "TEXT NOT NULL DEFAULT 'pending'",
+    },
 }
 
 
@@ -254,10 +264,14 @@ def create_app() -> Flask:
             "deleted_at": row["deleted_at"],
             "content_url": f"/api/photos/{row['id']}/content",
             "original_url": f"/api/photos/{row['id']}/original",
+            "thumbnail_url": f"/api/photos/{row['id']}/thumbnail" if row["thumb_path"] else None,
+            "processing": row["processing"],
         }
 
     def erase_photo(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
-        for relative_path in (row["relative_path"], row["display_path"]):
+        for relative_path in (
+            row["relative_path"], row["display_path"], row["thumb_path"], row["stream_path"]
+        ):
             if relative_path and (path := media_path(relative_path)) is not None:
                 path.unlink(missing_ok=True)
         connection.execute("DELETE FROM photos WHERE id = ?", (row["id"],))
@@ -367,6 +381,31 @@ def create_app() -> Flask:
         ).fetchall()
         return jsonify([photo_json(row) for row in rows]), 200
 
+    @app.get("/api/storage")
+    def storage() -> tuple[Any, int]:
+        user = require_user()
+        if not media_drive_available():
+            return jsonify({"error": "The photo library drive is unavailable."}), 503
+        drive = shutil.disk_usage(media_root)
+        row = database().execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN size_bytes END), 0) AS library_bytes,
+                COUNT(CASE WHEN deleted_at IS NULL THEN 1 END) AS library_items,
+                COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN size_bytes END), 0) AS trash_bytes,
+                COUNT(CASE WHEN deleted_at IS NOT NULL THEN 1 END) AS trash_items,
+                COALESCE(SUM(CASE WHEN uploaded_by = ? AND deleted_at IS NULL THEN size_bytes END), 0)
+                    AS my_bytes,
+                COUNT(CASE WHEN uploaded_by = ? AND deleted_at IS NULL THEN 1 END) AS my_items
+            FROM photos
+            """,
+            (user["id"], user["id"]),
+        ).fetchone()
+        return jsonify({
+            "drive": {"total_bytes": drive.total, "used_bytes": drive.used, "free_bytes": drive.free},
+            **dict(row),
+        }), 200
+
     @app.get("/api/trash")
     def list_trash() -> tuple[Any, int]:
         require_user()
@@ -442,6 +481,8 @@ def create_app() -> Flask:
                             display_image.save(display_file, "JPEG", quality=85)
                 except (OSError, ValueError, KeyError, SyntaxError):
                     logger.warning("Could not read image data from %s", safe_name, exc_info=True)
+            elif recorded_at := media.video_capture_time(media.probe(temp_path)):
+                taken_at = recorded_at
 
             # Folders use the wall-clock date where the photo was taken.
             relative_path = Path(
@@ -487,34 +528,42 @@ def create_app() -> Flask:
                 for path in created_files:
                     path.unlink(missing_ok=True)
 
-    def photo_file(photo_id: str, *, original: bool) -> Any:
+    def photo_row(photo_id: str) -> sqlite3.Row:
         require_user()
-        row = database().execute(
-            "SELECT * FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone()
+        row = database().execute("SELECT * FROM photos WHERE id = ?", (photo_id,)).fetchone()
         if row is None:
             abort(404)
-        use_display_copy = not original and row["display_path"]
-        path = media_path(row["display_path"] if use_display_copy else row["relative_path"])
+        return row
+
+    def send_media(relative_path: str | None, mimetype: str, **options: Any) -> Any:
+        path = media_path(relative_path) if relative_path else None
         if path is None or not path.is_file():
             abort(404)
-        if original:
-            return send_file(
-                path, mimetype=row["content_type"], conditional=True,
-                as_attachment=True, download_name=row["original_name"],
-            )
-        return send_file(
-            path, mimetype="image/jpeg" if use_display_copy else row["content_type"],
-            conditional=True,
-        )
+        return send_file(path, mimetype=mimetype, conditional=True, **options)
 
     @app.get("/api/photos/<photo_id>/content")
     def photo_content(photo_id: str) -> Any:
-        return photo_file(photo_id, original=False)
+        """What the app shows: the streaming copy of a video or the browser-friendly photo."""
+        row = photo_row(photo_id)
+        if row["stream_path"]:
+            return send_media(row["stream_path"], "video/mp4")
+        if row["display_path"]:
+            return send_media(row["display_path"], "image/jpeg")
+        return send_media(row["relative_path"], row["content_type"])
 
     @app.get("/api/photos/<photo_id>/original")
     def photo_original(photo_id: str) -> Any:
-        return photo_file(photo_id, original=True)
+        row = photo_row(photo_id)
+        return send_media(
+            row["relative_path"], row["content_type"],
+            as_attachment=True, download_name=row["original_name"],
+        )
+
+    @app.get("/api/photos/<photo_id>/thumbnail")
+    def photo_thumbnail(photo_id: str) -> Any:
+        row = photo_row(photo_id)
+        # Thumbnails never change for a given photo, so browsers may keep them for a day.
+        return send_media(row["thumb_path"], "image/jpeg", max_age=86400)
 
     @app.delete("/api/photos/<photo_id>")
     def delete_photo(photo_id: str) -> tuple[Any, int]:
@@ -863,6 +912,24 @@ def create_app() -> Flask:
         if cursor.rowcount == 0:
             raise SystemExit("No active account has that username.")
         print(f"Renamed {old_username} to {new_username}.")
+
+    @app.cli.command("process-media")
+    @click.option("--watch", is_flag=True, help="Keep running and process new uploads as they arrive.")
+    def process_media_command(watch: bool) -> None:
+        """Make thumbnails and video streaming copies for items waiting to be processed."""
+        import time
+
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+        connection = database()
+        while True:
+            if media_drive_available():
+                while media.process_next(connection, media_root, iso_timestamp):
+                    pass
+            else:
+                logger.error("Media drive is not mounted at %s; waiting.", media_mount)
+            if not watch:
+                break
+            time.sleep(5)
 
     @app.cli.command("purge-expired")
     def purge_expired_command() -> None:

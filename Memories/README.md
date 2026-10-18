@@ -9,7 +9,9 @@ A private, self-hosted photo and video library for family members on your Tailsc
 - SQLite for accounts and media metadata.
 - Original media in `MEDIA_ROOT`, on the dedicated 1 TB media drive (`/mnt/drive-2`), separate from the OS disk and the app code.
 
-**Dates.** Photo dates come from EXIF, including the timezone offset iPhones record; photos without an offset are assumed to be in the server's timezone. Upload time is used when there is no EXIF date (currently always the case for videos). All timestamps are stored in UTC. Files are placed under `MEDIA_ROOT/YYYY/MM/` by the local date the photo was taken.
+**Dates.** Photo dates come from EXIF, including the timezone offset iPhones record; photos without an offset are assumed to be in the server's timezone. Video dates come from the file's metadata (iPhones record the local time and offset). Upload time is used when there is no date. All timestamps are stored in UTC. Files are placed under `MEDIA_ROOT/YYYY/MM/` by the local date the photo was taken.
+
+**Thumbnails and video streaming copies.** A background worker (`memories-worker.service`, running `flask process-media --watch`) makes an 800 px JPEG thumbnail for every photo and a poster frame for every video under `MEDIA_ROOT/_thumbs/`, and a 1080p H.264 streaming copy (about 3–6 Mbps, AAC audio, fast-start) of each video under `MEDIA_ROOT/_streams/`, so video plays smoothly away from home. iPhone HDR video is tone-mapped to SDR. H.264 videos at 8 Mbps or less with AAC/MP3 audio are played directly. Video capture dates are read from the file's metadata at upload (older videos are re-dated and moved to the right `YYYY/MM` folder by the worker). Items show "Processing…" until done; a file that can't be processed is marked failed and keeps playing from the original. All of these are rebuildable from the originals; Save to Photos and downloads always return the original. Requires `ffmpeg`.
 
 **iPhone photos.** HEIC/HEIF (and TIFF) photos are stored untouched, and a JPEG display copy is saved under `MEDIA_ROOT/_previews/` so they show in every browser. Downloads always return the original file. Display copies can be regenerated from originals, but are included when you copy `MEDIA_ROOT`.
 
@@ -66,45 +68,39 @@ Open the address printed by Vite (normally `http://localhost:5173`). Run the tes
 
 ## Keep it running on the server
 
-Run Gunicorn under `systemd` (not Flask's development server) and publish it on your tailnet with Tailscale Serve, which provides HTTPS. Gunicorn stays bound to localhost.
+Run Gunicorn under `systemd` (not Flask's development server). Gunicorn listens on `127.0.0.1:8000` and Tailscale Serve publishes it over HTTPS at `https://mc-server.tailc7ae2e.ts.net` (step 3). HTTPS is needed for saving originals straight to Photos on iPhone and for the invite Share button. Plain HTTP on the Tailscale address also works (see the comment in `/etc/memories.env`).
 
-1. Create a service account and data directories, and put the app in `/opt/memories`:
+1. Build the frontend as your normal user, then run the install script from the project folder:
 
    ```sh
-   sudo useradd --system --home-dir /opt/memories --shell /usr/sbin/nologin memories
-   sudo install -d -o memories -g memories /var/lib/memories /mnt/drive-2/memories
-   sudo chown -R memories:memories /mnt/drive-2/memories   # includes any library already copied there
-   sudo cp -r . /opt/memories   # from this project folder
-   cd /opt/memories
-   sudo python3 -m venv .venv && sudo .venv/bin/pip install -r requirements.txt
-   cd frontend && sudo npm ci && sudo npm run build
+   (cd frontend && npm run build)
+   sudo deploy/install.sh
    ```
 
-2. Create `/etc/memories.env` (readable only by root and `memories`):
+   [deploy/install.sh](./deploy/install.sh) creates the `memories` service account, `/var/lib/memories` and `/mnt/drive-2/memories`, copies the app to `/opt/memories` with its own virtualenv, copies `data/photolibrary.sqlite3` to `/var/lib/memories` on first install, writes `/etc/memories.env` with a random `SECRET_KEY` if it doesn't exist (readable only by root and `memories`), installs and enables `memories.service`, `memories-worker.service` and `memories-purge.timer`, and checks that the app answers. It needs Tailscale connected (it reads the address from `tailscale ip -4`). It refuses to run if the media drive isn't mounted.
+
+   `/etc/memories.env` contains:
 
    ```ini
    APP_ENV=production
-   SECRET_KEY=replace-with-a-long-random-secret
+   SECRET_KEY=<random>
    DATABASE_PATH=/var/lib/memories/photolibrary.sqlite3
    MEDIA_MOUNT=/mnt/drive-2
    MEDIA_ROOT=/mnt/drive-2/memories/library
    MAX_UPLOAD_MB=2048
+   MEMORIES_BIND=127.0.0.1:8000
    SESSION_COOKIE_SECURE=true
    ```
 
-   Generate the secret with `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`.
-
-3. Install and start the units in [deploy/](./deploy/):
+2. The service starts at boot (after Tailscale, retrying until its address is ready), restarts if it crashes, and keeps running when you log out. The purge timer runs hourly and permanently removes items that have been in the trash for 30 days. Useful commands:
 
    ```sh
-   sudo cp deploy/memories.service deploy/memories-purge.service deploy/memories-purge.timer /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now memories.service memories-purge.timer
+   systemctl status memories
+   journalctl -u memories -f          # live log
+   sudo systemctl restart memories
    ```
 
-   The purge timer runs hourly and permanently removes items that have been in the trash for 30 days. Check logs with `journalctl -u memories -u memories-purge`.
-
-4. Publish it on the tailnet. MagicDNS and HTTPS certificates must be enabled in the Tailscale admin console (DNS page). Then:
+3. Publish it over HTTPS: enable MagicDNS and HTTPS certificates in the Tailscale admin console (DNS page), then:
 
    ```sh
    sudo tailscale serve --bg 8000
@@ -113,7 +109,9 @@ Run Gunicorn under `systemd` (not Flask's development server) and publish it on 
 
    The library is then at `https://<server-name>.<tailnet>.ts.net` for devices on your tailnet. Do not use `tailscale funnel`, which would expose it to the public internet.
 
-To update the app later: copy the new code to `/opt/memories`, reinstall requirements, rebuild the frontend, and `sudo systemctl restart memories`.
+To update the app later: rebuild the frontend and run `sudo deploy/install.sh` again. It replaces the code, updates packages and restarts the service; it never overwrites the database, media or `/etc/memories.env`.
+
+For development test runs alongside the service, use a separate `DATABASE_PATH` and `MEDIA_ROOT` under `data/` (the media folder on the drive belongs to the `memories` account after install).
 
 Back up both the SQLite database and `MEDIA_ROOT`. The database holds the accounts, metadata and relative file paths; the media files are the irreplaceable originals.
 
