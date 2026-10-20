@@ -47,7 +47,7 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .primary-button { padding: 11px 17px; color: #fff; background: #1f3a68; border: 0; border-radius: 7px; font-size: 12px; font-weight: 600; transition: background .15s; }
 .primary-button:hover { background: #172c50; }
 .upload-button { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 40px; height: 40px; font-size: 17px; }
-.forgot-button { padding: 11px 17px; color: #fff; background: #1f3a6800; border: 0; border-radius: 0px; font-size: 12px; color: #272923; font-weight: 600; text-decoration: underline; transition: background 0s; }
+.forgot-button { padding: 0px; justify-self:center; color: #fff; background: #1f3a6800; border: 0; border-radius: 0px; font-size: 12px; color: #272923; font-weight: 600; text-decoration: underline; transition: background 0s; }
 .month-group { margin-bottom: 39px; }
 .month-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 17px; }
 .month-heading h2 { margin: 0; font: 700 16px "Avenir Next", Avenir, sans-serif; }
