@@ -250,12 +250,11 @@ function App() {
     return (
       <main className="center-card auth-card">
         <div className="brand-mark">M</div>
-        <p className="eyebrow">YOUR FAMILY, IN FOCUS</p>
         <h1>{session.can_create_first_user ? "Set up Memories" : "Welcome back"}</h1>
         <p className="muted">
           {session.can_create_first_user
-            ? "Create the first account. It becomes the admin account, which can add family members."
-            : "Sign in to your private family photo library."}
+            ? "Create Admin account."
+            : "Sign in"}
         </p>
         <form onSubmit={submitCredentials}>
           <label>Username<input name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} minLength={2} required /></label>
@@ -264,11 +263,13 @@ function App() {
           <button className="primary-button" disabled={busy}>
             {busy ? "Please wait…" : session.can_create_first_user ? "Create admin account" : "Sign in"}
           </button>
-        </form>
-        {!session.can_create_first_user && (
-          <p className="footnote">Forgot your username or password? Ask the admin to reset it from Family accounts.</p>
+          {!session.can_create_first_user && (
+          <button type="button" className="forgot-button" disabled={busy}>
+            Forgot Username or Password?
+          </button>
         )}
-        <p className="footnote">Private access for your family over Tailscale.</p>
+        </form>
+        
       </main>
     );
   }
