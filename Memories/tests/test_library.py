@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -551,3 +552,163 @@ def test_existing_library_is_upgraded_and_first_account_becomes_admin(tmp_path, 
     assert client.get("/api/session").json["is_admin"] is True
     users = {u["username"]: u["is_admin"] for u in client.get("/api/admin/users").json}
     assert users == {"iven": True, "mom": False}
+    assert [album["name"] for album in client.get("/api/albums").json] == [
+        "Favorites", "Uploaded by iven", "Uploaded by mom",
+    ]
+    # Restarting doesn't add a second Favorites album.
+    create_app()
+    assert [album["name"] for album in client.get("/api/albums").json].count("Favorites") == 1
+
+
+def albums_by_name(client):
+    return {album["name"]: album for album in client.get("/api/albums").json}
+
+
+def test_albums_start_with_favorites_and_one_uploaded_by_album_per_person(client, app):
+    assert client.get("/api/albums").status_code == 401
+    assert establish_first_user(client).status_code == 201
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    upload(client, b"my photo", "mine.jpg")
+    upload(member, b"mom photo", "moms.jpg")
+    photos = {photo["original_name"]: photo["id"] for photo in client.get("/api/photos").json}
+
+    albums = client.get("/api/albums").json
+    assert [(album["kind"], album["name"]) for album in albums] == [
+        ("favorites", "Favorites"),
+        ("uploader", "Uploaded by family"),
+        ("uploader", "Uploaded by mom"),
+    ]
+    by_name = {album["name"]: album for album in albums}
+    assert by_name["Favorites"]["photo_ids"] == []
+    assert by_name["Uploaded by family"]["photo_ids"] == [photos["mine.jpg"]]
+    assert by_name["Uploaded by mom"]["photo_ids"] == [photos["moms.jpg"]]
+    # Shared: the other account sees the same albums.
+    assert member.get("/api/albums").json == albums
+
+
+def test_favorites_and_uploaded_by_albums_cannot_be_renamed_or_deleted(client):
+    establish_first_user(client)
+    favorites = albums_by_name(client)["Favorites"]
+    assert client.patch(f"/api/albums/{favorites['id']}", json={"name": "Best"}).status_code == 400
+    assert client.delete(f"/api/albums/{favorites['id']}").status_code == 400
+    assert "Favorites" in albums_by_name(client)
+    # Uploaded-by albums have no album id, so there is nothing to rename or delete.
+    assert albums_by_name(client)["Uploaded by family"]["id"] is None
+    # A custom album can't take the Favorites name.
+    assert client.post("/api/albums", json={"name": "favorites"}).status_code == 409
+
+
+def test_shared_album_create_add_rename_remove_and_delete(client, app):
+    establish_first_user(client)
+    make_family_member(client)
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    upload(client, b"beach photo", "beach.jpg")
+    photo_id = client.get("/api/photos").json[0]["id"]
+
+    assert client.post("/api/albums", json={"name": "  "}).status_code == 400
+    created = client.post("/api/albums", json={"name": "Summer 2026"})
+    assert created.status_code == 201
+    album_id = created.json["id"]
+    assert client.post("/api/albums", json={"name": "summer 2026"}).status_code == 409
+
+    # Another family member can add to it, and adding twice keeps one copy.
+    for _ in range(2):
+        response = member.post(f"/api/albums/{album_id}/photos", json={"photo_id": photo_id})
+        assert response.status_code == 200
+    assert albums_by_name(client)["Summer 2026"]["photo_ids"] == [photo_id]
+    assert member.post(f"/api/albums/{album_id}/photos", json={"photo_id": "nope"}).status_code == 404
+
+    assert member.patch(f"/api/albums/{album_id}", json={"name": "Beach trip"}).status_code == 200
+    assert "Beach trip" in albums_by_name(client)
+
+    assert client.delete(f"/api/albums/{album_id}/photos/{photo_id}").status_code == 200
+    assert albums_by_name(client)["Beach trip"]["photo_ids"] == []
+
+    member.post(f"/api/albums/{album_id}/photos", json={"photo_id": photo_id})
+    assert member.delete(f"/api/albums/{album_id}").status_code == 200
+    assert "Beach trip" not in albums_by_name(client)
+    # Deleting an album never deletes its photos.
+    assert [photo["id"] for photo in client.get("/api/photos").json] == [photo_id]
+
+
+def test_trashed_items_leave_albums_until_restored_and_are_removed_when_erased(client, app):
+    establish_first_user(client)
+    upload(client, b"favorite photo", "fav.jpg")
+    photo_id = client.get("/api/photos").json[0]["id"]
+    favorites = albums_by_name(client)["Favorites"]
+    client.post(f"/api/albums/{favorites['id']}/photos", json={"photo_id": photo_id})
+
+    client.delete(f"/api/photos/{photo_id}")
+    albums = albums_by_name(client)
+    assert albums["Favorites"]["photo_ids"] == []
+    assert albums["Uploaded by family"]["photo_ids"] == []
+    assert client.post(
+        f"/api/albums/{favorites['id']}/photos", json={"photo_id": photo_id}
+    ).status_code == 404
+
+    client.post(f"/api/photos/{photo_id}/restore")
+    assert albums_by_name(client)["Favorites"]["photo_ids"] == [photo_id]
+
+    client.delete(f"/api/photos/{photo_id}")
+    assert client.delete(f"/api/trash/{photo_id}").status_code == 200
+    with sqlite3.connect(app.config["DATABASE_PATH"]) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM album_photos").fetchone()[0] == 0
+
+
+def test_removed_account_keeps_uploaded_by_album_only_while_it_has_uploads(client, app):
+    establish_first_user(client)
+    make_family_member(client)
+    make_family_member(client, "dad", "dads-long-password")
+    member = app.test_client()
+    member.post("/api/login", json={"username": "mom", "password": "moms-long-password"})
+    upload(member, b"mom photo", "moms.jpg")
+    accounts = {account["username"]: account["id"] for account in client.get("/api/admin/users").json}
+    client.delete(f"/api/admin/users/{accounts['mom']}")
+    client.delete(f"/api/admin/users/{accounts['dad']}")
+
+    names = albums_by_name(client)
+    assert "Uploaded by mom" in names
+    assert "Uploaded by dad" not in names
+
+
+def test_upload_into_album_adds_new_files_and_existing_ones_without_copies(client, app):
+    establish_first_user(client)
+    album_id = client.post("/api/albums", json={"name": "Camping"}).json["id"]
+    upload(client, b"already here", "old.jpg")
+    upload(client, b"was deleted", "deleted.jpg")
+    photos = {photo["original_name"]: photo["id"] for photo in client.get("/api/photos").json}
+    client.delete(f"/api/photos/{photos['deleted.jpg']}")
+
+    def upload_to_album(contents, name, album=album_id):
+        return client.post(
+            "/api/photos",
+            data={"file": (io.BytesIO(contents), name), "album_id": str(album)},
+            content_type="multipart/form-data",
+        )
+
+    new = upload_to_album(b"brand new", "new.jpg")
+    assert new.status_code == 201
+    existing = upload_to_album(b"already here", "old-again.jpg")
+    assert existing.status_code == 200
+    assert existing.json == {"status": "already_in_library", "id": photos["old.jpg"], "restored": False}
+    trashed = upload_to_album(b"was deleted", "deleted-again.jpg")
+    assert trashed.json == {"status": "already_in_library", "id": photos["deleted.jpg"], "restored": True}
+
+    assert client.get("/api/trash").json == []
+    assert len(client.get("/api/photos").json) == 3  # no copies were made
+    assert set(albums_by_name(client)["Camping"]["photo_ids"]) == {
+        new.json["id"], photos["old.jpg"], photos["deleted.jpg"],
+    }
+    # Uploading the same album again changes nothing.
+    assert upload_to_album(b"brand new", "new.jpg").status_code == 200
+    assert len(albums_by_name(client)["Camping"]["photo_ids"]) == 3
+
+    # Without an album, a duplicate is still refused as before.
+    assert upload(client, b"brand new", "new.jpg").status_code == 409
+    # An unknown album is refused before anything is stored.
+    assert upload_to_album(b"another", "x.jpg", album=9999).status_code == 404
+    assert upload_to_album(b"another", "x.jpg", album="abc").status_code == 404
+    assert len(client.get("/api/photos").json) == 3

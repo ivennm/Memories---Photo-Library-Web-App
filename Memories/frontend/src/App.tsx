@@ -1,5 +1,8 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { CircleUser, Download, Ellipsis, Images, LoaderCircle, Plus, Trash, Trash2, Users } from "lucide-react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Album as AlbumIcon, Check, ChevronLeft, CircleUser, Download, Ellipsis, FolderMinus, FolderPlus, Heart,
+  Images, LoaderCircle, Plus, Trash, Trash2, Users,
+} from "lucide-react";
 
 type Session = {
   authenticated: boolean;
@@ -44,7 +47,17 @@ type Notice = {
   restorePhotoId?: string;
 };
 
-type View = "library" | "trash" | "family" | "account";
+// Shared by everyone. "favorites" and "uploader" albums are made automatically and can't be deleted;
+// "uploader" albums (one per person) have no id because they follow who uploaded each item.
+type AlbumInfo = {
+  key: string;
+  id: number | null;
+  kind: "favorites" | "custom" | "uploader";
+  name: string;
+  photo_ids: string[];
+};
+
+type View = "library" | "albums" | "trash" | "family" | "account";
 
 class ApiError extends Error {
   constructor(
@@ -85,23 +98,29 @@ function App() {
   const [inviteToken, setInviteToken] = useState(inviteTokenFromAddress);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [trash, setTrash] = useState<Photo[]>([]);
+  const [albums, setAlbums] = useState<AlbumInfo[]>([]);
   const [view, setView] = useState<View>("library");
+  const [openAlbumKey, setOpenAlbumKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [uploadStatus, setUploadStatus] = useState("");
   const [error, setError] = useState("");
   const [notices, setNotices] = useState<Notice[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The album the next picked files go into (null = just the library).
+  const uploadAlbumRef = useRef<AlbumInfo | null>(null);
 
   const refresh = useCallback(async () => {
     const current = await api<Session>("/api/session");
     setSession(current);
     if (current.authenticated) {
-      const [library, deleted] = await Promise.all([
+      const [library, deleted, albumList] = await Promise.all([
         api<Photo[]>("/api/photos"),
         api<Photo[]>("/api/trash"),
+        api<AlbumInfo[]>("/api/albums"),
       ]);
       setPhotos(library);
       setTrash(deleted);
+      setAlbums(albumList);
     }
   }, []);
 
@@ -150,22 +169,38 @@ function App() {
     }
   }
 
+  // Opens the file picker. With an album, everything picked also goes into that album.
+  function chooseFiles(album: AlbumInfo | null = null) {
+    uploadAlbumRef.current = album;
+    inputRef.current?.click();
+  }
+
   async function uploadFiles(files: FileList | null) {
     if (!files?.length) return;
     const selected = Array.from(files);
+    const album = uploadAlbumRef.current;
     setError("");
     setNotices([]);
     setBusy(true);
     const newNotices: Notice[] = [];
     let uploaded = 0;
+    // Into an album: files already in Memories are added to it instead of being refused.
+    let alreadyInLibrary = 0;
+    let restored = 0;
     try {
       for (const [index, file] of selected.entries()) {
         setUploadStatus(selected.length > 1 ? `Uploading ${index + 1} of ${selected.length}…` : "Uploading…");
         const data = new FormData();
         data.append("file", file);
+        if (album?.id != null) data.append("album_id", String(album.id));
         try {
-          await api("/api/photos", { method: "POST", body: data });
-          uploaded += 1;
+          const result = await api<{ status: string; restored?: boolean }>("/api/photos", { method: "POST", body: data });
+          if (result.status === "already_in_library") {
+            alreadyInLibrary += 1;
+            if (result.restored) restored += 1;
+          } else {
+            uploaded += 1;
+          }
         } catch (reason) {
           if (reason instanceof ApiError && reason.status === 401) throw reason;
           const trashedPhotoId =
@@ -177,7 +212,18 @@ function App() {
           });
         }
       }
-      if (uploaded > 0 && newNotices.length > 0) {
+      if (album) {
+        const added = uploaded + alreadyInLibrary;
+        const details = [
+          `${uploaded} new`,
+          alreadyInLibrary > 0 && `${alreadyInLibrary} already in Memories`,
+          restored > 0 && `${restored} restored from Recently deleted`,
+        ].filter(Boolean).join(", ");
+        newNotices.unshift({
+          key: "summary",
+          message: `Added ${added} of ${selected.length} ${selected.length === 1 ? "item" : "items"} to ${album.name} (${details}).`,
+        });
+      } else if (uploaded > 0 && newNotices.length > 0) {
         newNotices.unshift({ key: "summary", message: `Uploaded ${uploaded} of ${selected.length} files.` });
       }
       setNotices(newNotices);
@@ -187,6 +233,7 @@ function App() {
     } finally {
       setBusy(false);
       setUploadStatus("");
+      uploadAlbumRef.current = null;
       if (inputRef.current) inputRef.current.value = "";
     }
   }
@@ -224,12 +271,89 @@ function App() {
     }
   }
 
+  // Adds or removes one item from an album. Returns false if it didn't work (the error is shown).
+  async function setInAlbum(album: AlbumInfo, photo: Photo, include: boolean) {
+    setError("");
+    try {
+      await (include
+        ? api(`/api/albums/${album.id}/photos`, { method: "POST", body: JSON.stringify({ photo_id: photo.id }) })
+        : api(`/api/albums/${album.id}/photos/${photo.id}`, { method: "DELETE" }));
+      await refresh();
+      return true;
+    } catch (reason) {
+      showError(reason);
+      return false;
+    }
+  }
+
+  // Asks for a name and makes a new shared album; returns its id, or null if cancelled or refused.
+  async function createAlbum() {
+    const name = window.prompt("Name for the new album:")?.trim();
+    if (!name) return null;
+    setError("");
+    try {
+      const created = await api<{ id: number }>("/api/albums", { method: "POST", body: JSON.stringify({ name }) });
+      await refresh();
+      return created.id;
+    } catch (reason) {
+      showError(reason);
+      return null;
+    }
+  }
+
+  // From the New album card: make the album and go straight into it, ready to upload.
+  async function openNewAlbum() {
+    const albumId = await createAlbum();
+    if (albumId !== null) setOpenAlbumKey(`album-${albumId}`);
+  }
+
+  async function createAlbumWith(photo: Photo) {
+    const albumId = await createAlbum();
+    if (albumId === null) return;
+    try {
+      await api(`/api/albums/${albumId}/photos`, { method: "POST", body: JSON.stringify({ photo_id: photo.id }) });
+      await refresh();
+    } catch (reason) {
+      showError(reason);
+    }
+  }
+
+  async function renameAlbum(album: AlbumInfo) {
+    const name = window.prompt("New name for this album:", album.name)?.trim();
+    if (!name || name === album.name) return;
+    setError("");
+    try {
+      await api(`/api/albums/${album.id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+      await refresh();
+    } catch (reason) {
+      showError(reason);
+    }
+  }
+
+  async function deleteAlbum(album: AlbumInfo) {
+    if (!window.confirm(`Delete the album "${album.name}" for everyone? The photos and videos in it stay in All photos.`)) return;
+    setError("");
+    try {
+      await api(`/api/albums/${album.id}`, { method: "DELETE" });
+      setOpenAlbumKey(null);
+      await refresh();
+    } catch (reason) {
+      showError(reason);
+    }
+  }
+
+  function openView(next: View) {
+    setView(next);
+    setOpenAlbumKey(null);
+  }
+
   async function logout() {
     await api("/api/logout", { method: "POST" });
     setPhotos([]);
     setTrash([]);
+    setAlbums([]);
     setNotices([]);
-    setView("library");
+    openView("library");
     await refresh();
   }
 
@@ -276,30 +400,51 @@ function App() {
 
   const showTrash = view === "trash";
   const visiblePhotos = showTrash ? trash : photos;
-  const groups = visiblePhotos.reduce<Record<string, Photo[]>>((result, photo) => {
-    const date = new Date(photo.taken_at);
-    const key = date.toLocaleDateString(undefined, { year: "numeric", month: "long" });
-    (result[key] ??= []).push(photo);
-    return result;
-  }, {});
+  const photosById = new Map(photos.map((photo) => [photo.id, photo]));
+  // Favorites and custom albums; "Uploaded by" albums fill themselves.
+  const editableAlbums = albums.filter((album) => album.kind !== "uploader");
+  const openAlbum = view === "albums" ? albums.find((album) => album.key === openAlbumKey) : undefined;
+
+  const libraryMenu = (photo: Photo, currentAlbum?: AlbumInfo) => (
+    <PhotoMenu
+      photo={photo}
+      albums={editableAlbums}
+      currentAlbum={currentAlbum}
+      onSetInAlbum={(album, include) => setInAlbum(album, photo, include)}
+      onCreateAlbum={() => void createAlbumWith(photo)}
+      onMoveToTrash={() => void moveToTrash(photo)}
+    />
+  );
+
+  const trashActions = (photo: Photo) => (
+    <div className="photo-actions">
+      <button className="text-button" onClick={() => void restore(photo.id)}>Restore</button>
+      {session.is_admin && (
+        <button className="text-button delete-button" onClick={() => void deleteForever(photo)}>Delete forever</button>
+      )}
+    </div>
+  );
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span><span className="app-version">v{__APP_VERSION__}</span></a>
         <p className="side-label">LIBRARY</p>
-        <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => setView("library")}>
+        <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => openView("library")}>
           <Images className="icon" aria-hidden="true" /> All photos <span className="nav-count">{photos.length}</span>
         </button>
-        <button className={`nav-item ${showTrash ? "selected" : ""}`} onClick={() => setView("trash")}>
+        <button className={`nav-item ${view === "albums" ? "selected" : ""}`} onClick={() => openView("albums")}>
+          <AlbumIcon className="icon" aria-hidden="true" /> Albums <span className="nav-count">{albums.length}</span>
+        </button>
+        <button className={`nav-item ${showTrash ? "selected" : ""}`} onClick={() => openView("trash")}>
           <Trash2 className="icon" aria-hidden="true" /> Recently deleted <span className="nav-count">{trash.length}</span>
         </button>
         {session.is_admin && (
-          <button className={`nav-item ${view === "family" ? "selected" : ""}`} onClick={() => setView("family")}>
+          <button className={`nav-item ${view === "family" ? "selected" : ""}`} onClick={() => openView("family")}>
             <Users className="icon" aria-hidden="true" /> Family accounts
           </button>
         )}
-        <button className={`nav-item nav-account ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")}>
+        <button className={`nav-item nav-account ${view === "account" ? "selected" : ""}`} onClick={() => openView("account")}>
           <CircleUser className="icon" aria-hidden="true" /> My account
         </button>
         <div className="sidebar-bottom">
@@ -313,11 +458,11 @@ function App() {
           <span className="app-version topbar-version">Memories v{__APP_VERSION__}</span>
           <div className="topbar-actions">
             {view === "library" && (
-              <button className="primary-button upload-button" disabled={busy} onClick={() => inputRef.current?.click()} aria-label="Upload photos" title="Upload photos">
+              <button className="primary-button upload-button" disabled={busy} onClick={() => chooseFiles()} aria-label="Upload photos" title="Upload photos">
                 {busy ? uploadStatus || "Uploading…" : <Plus className="icon" aria-hidden="true" />}
               </button>
             )}
-            <button className={`account-button ${view === "account" ? "selected" : ""}`} onClick={() => setView("account")} aria-label="My account" title="My account">
+            <button className={`account-button ${view === "account" ? "selected" : ""}`} onClick={() => openView("account")} aria-label="My account" title="My account">
               <CircleUser className="icon" aria-hidden="true" />
             </button>
           </div>
@@ -343,6 +488,21 @@ function App() {
           <MyAccount username={session.username ?? ""} onChanged={refresh} onError={showError} onSignOut={() => void logout()} />
         ) : view === "family" ? (
           <FamilyAccounts currentUsername={session.username ?? ""} onChanged={refresh} onError={showError} />
+        ) : view === "albums" ? (
+          openAlbum ? (
+            <AlbumDetail
+              album={openAlbum}
+              photos={openAlbum.photo_ids.flatMap((id) => photosById.get(id) ?? [])}
+              onBack={() => setOpenAlbumKey(null)}
+              onRename={() => void renameAlbum(openAlbum)}
+              onDelete={() => void deleteAlbum(openAlbum)}
+              onUpload={() => chooseFiles(openAlbum)}
+              uploading={busy ? uploadStatus || "Uploading…" : null}
+              renderActions={(photo) => libraryMenu(photo, openAlbum)}
+            />
+          ) : (
+            <AlbumList albums={albums} photosById={photosById} onOpen={setOpenAlbumKey} onCreate={() => void openNewAlbum()} />
+          )
         ) : (
           <>
             {showTrash && (
@@ -355,58 +515,164 @@ function App() {
               <section className="empty-state">
                 <h2>{showTrash ? "Trash is empty" : "Your memories start here"}</h2>
                 <p>{showTrash ? "Deleted photos will be kept here for 30 days." : "Upload photos and videos to start building your shared family library."}</p>
-                {!showTrash && <button className="primary-button" onClick={() => inputRef.current?.click()}>Choose photos</button>}
+                {!showTrash && <button className="primary-button" onClick={() => chooseFiles()}>Choose photos</button>}
               </section>
             ) : (
-              <div className="timeline">
-                {Object.entries(groups).map(([month, items]) => (
-                  <section className="month-group" key={month}>
-                    <div className="month-heading"><h2>{month}</h2><span>{items.length} {items.length === 1 ? "item" : "items"}</span></div>
-                    <div className="photo-grid">
-                      {items.map((photo) => (
-                        <article className="photo-card" key={photo.id}>
-                          {photo.content_type.startsWith("video/") ? (
-                            // With a poster, nothing downloads until play is pressed.
-                            <video
-                              src={photo.content_url}
-                              poster={photo.thumbnail_url ?? undefined}
-                              controls
-                              playsInline
-                              preload={photo.thumbnail_url ? "none" : "metadata"}
-                            />
-                          ) : (
-                            <img src={photo.thumbnail_url ?? photo.content_url} alt={photo.original_name} loading="lazy" />
-                          )}
-                          {photo.processing === "pending" && photo.content_type.startsWith("video/") && (
-                            <span className="processing-badge">Processing…</span>
-                          )}
-                          <div className="photo-details">
-                            <div className="photo-text">
-                              <span className="photo-name" title={photo.original_name}>{photo.original_name}</span>
-                              <span className="photo-byline">{new Date(photo.taken_at).toLocaleDateString()} · {photo.uploaded_by}</span>
-                            </div>
-                            {showTrash ? (
-                              <div className="photo-actions">
-                                <button className="text-button" onClick={() => void restore(photo.id)}>Restore</button>
-                                {session.is_admin && (
-                                  <button className="text-button delete-button" onClick={() => void deleteForever(photo)}>Delete forever</button>
-                                )}
-                              </div>
-                            ) : (
-                              <PhotoMenu photo={photo} onMoveToTrash={() => void moveToTrash(photo)} />
-                            )}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
+              <PhotoTimeline photos={visiblePhotos} renderActions={showTrash ? trashActions : (photo) => libraryMenu(photo)} />
             )}
           </>
         )}
       </main>
     </div>
+  );
+}
+
+// Photos and videos grouped by the month they were taken, with each card's actions supplied by the page.
+function PhotoTimeline({ photos, renderActions }: { photos: Photo[]; renderActions: (photo: Photo) => ReactNode }) {
+  const groups = photos.reduce<Record<string, Photo[]>>((result, photo) => {
+    const date = new Date(photo.taken_at);
+    const key = date.toLocaleDateString(undefined, { year: "numeric", month: "long" });
+    (result[key] ??= []).push(photo);
+    return result;
+  }, {});
+
+  return (
+    <div className="timeline">
+      {Object.entries(groups).map(([month, items]) => (
+        <section className="month-group" key={month}>
+          <div className="month-heading"><h2>{month}</h2><span>{items.length} {items.length === 1 ? "item" : "items"}</span></div>
+          <div className="photo-grid">
+            {items.map((photo) => (
+              <article className="photo-card" key={photo.id}>
+                {photo.content_type.startsWith("video/") ? (
+                  // With a poster, nothing downloads until play is pressed.
+                  <video
+                    src={photo.content_url}
+                    poster={photo.thumbnail_url ?? undefined}
+                    controls
+                    playsInline
+                    preload={photo.thumbnail_url ? "none" : "metadata"}
+                  />
+                ) : (
+                  <img src={photo.thumbnail_url ?? photo.content_url} alt={photo.original_name} loading="lazy" />
+                )}
+                {photo.processing === "pending" && photo.content_type.startsWith("video/") && (
+                  <span className="processing-badge">Processing…</span>
+                )}
+                <div className="photo-details">
+                  <div className="photo-text">
+                    <span className="photo-name" title={photo.original_name}>{photo.original_name}</span>
+                    <span className="photo-byline">{new Date(photo.taken_at).toLocaleDateString()} · {photo.uploaded_by}</span>
+                  </div>
+                  {renderActions(photo)}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function AlbumCover({ photo, kind }: { photo?: Photo; kind: AlbumInfo["kind"] }) {
+  // The newest item's thumbnail; a video without a poster frame yet gets the placeholder.
+  const src = photo && (photo.thumbnail_url ?? (photo.content_type.startsWith("video/") ? null : photo.content_url));
+  return (
+    <span className="album-cover">
+      {src ? (
+        <img src={src} alt="" loading="lazy" />
+      ) : kind === "favorites" ? (
+        <Heart className="icon" aria-hidden="true" />
+      ) : (
+        <Images className="icon" aria-hidden="true" />
+      )}
+    </span>
+  );
+}
+
+function AlbumList({ albums, photosById, onOpen, onCreate }: {
+  albums: AlbumInfo[];
+  photosById: Map<string, Photo>;
+  onOpen: (key: string) => void;
+  onCreate: () => void;
+}) {
+  const card = (album: AlbumInfo) => (
+    <button className="album-card" key={album.key} onClick={() => onOpen(album.key)}>
+      <AlbumCover photo={photosById.get(album.photo_ids[0])} kind={album.kind} />
+      <span className="album-name" title={album.name}>{album.name}</span>
+      <span className="album-count">{itemCount(album.photo_ids.length)}</span>
+    </button>
+  );
+
+  return (
+    <div className="timeline">
+      <section className="month-group">
+        <div className="month-heading"><h2>Albums</h2><span>Shared with the whole family</span></div>
+        <div className="album-grid">
+          {albums.filter((album) => album.kind !== "uploader").map(card)}
+          <button className="album-card new-album" onClick={onCreate}>
+            <span className="album-cover"><Plus className="icon" aria-hidden="true" /></span>
+            <span className="album-name">New album</span>
+            <span className="album-count">Name it, then add photos</span>
+          </button>
+        </div>
+      </section>
+      <section className="month-group">
+        <div className="month-heading"><h2>People</h2><span>Everything each person has uploaded</span></div>
+        <div className="album-grid">{albums.filter((album) => album.kind === "uploader").map(card)}</div>
+      </section>
+    </div>
+  );
+}
+
+function AlbumDetail({ album, photos, onBack, onRename, onDelete, onUpload, uploading, renderActions }: {
+  album: AlbumInfo;
+  photos: Photo[];
+  onBack: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  onUpload: () => void;
+  // The upload progress text while uploading, otherwise null.
+  uploading: string | null;
+  renderActions: (photo: Photo) => ReactNode;
+}) {
+  const emptyHint = {
+    favorites: "In All photos, tap ··· on a photo or video and choose Add to Favorites.",
+    custom:
+      "Tap Upload photos to add from your phone or computer. On iPhone, choose Albums in the picker, open an album and drag across the photos to select them all. Photos already in Memories are added without making copies. You can also use ··· > Add to album in All photos.",
+    uploader: "Nothing uploaded yet.",
+  }[album.kind];
+
+  return (
+    <>
+      <div className="album-header">
+        <button className="text-button back-button" onClick={onBack}>
+          <ChevronLeft className="icon" aria-hidden="true" /> Albums
+        </button>
+        <div className="album-title">
+          <h1>{album.name}</h1>
+          <span>{itemCount(photos.length)}</span>
+        </div>
+        {album.kind === "custom" && (
+          <span className="album-actions">
+            <button className="primary-button album-upload" disabled={uploading !== null} onClick={onUpload}>
+              {uploading ?? <><Plus className="icon" aria-hidden="true" /> Upload photos</>}
+            </button>
+            <button className="text-button" onClick={onRename}>Rename</button>
+            <button className="text-button delete-button" onClick={onDelete}>Delete album</button>
+          </span>
+        )}
+      </div>
+      {photos.length === 0 ? (
+        <section className="empty-state">
+          <h2>{album.kind === "favorites" ? "No favorites yet" : "This album is empty"}</h2>
+          <p>{emptyHint}</p>
+        </section>
+      ) : (
+        <PhotoTimeline photos={photos} renderActions={renderActions} />
+      )}
+    </>
   );
 }
 
@@ -428,16 +694,31 @@ function downloadOriginal(photo: Photo) {
 
 type SaveState = { step: "idle" } | { step: "preparing" } | { step: "ready"; file: File };
 
-function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () => void }) {
+function PhotoMenu({ photo, albums, currentAlbum, onSetInAlbum, onCreateAlbum, onMoveToTrash }: {
+  photo: Photo;
+  // Favorites and custom albums (the ones items can be added to).
+  albums: AlbumInfo[];
+  // The album being viewed, if any, so the item can be taken out of it.
+  currentAlbum?: AlbumInfo;
+  onSetInAlbum: (album: AlbumInfo, include: boolean) => Promise<boolean>;
+  onCreateAlbum: () => void;
+  onMoveToTrash: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  // "albums" shows the list of albums to tick, in place of the main menu.
+  const [pane, setPane] = useState<"main" | "albums">("main");
   const [save, setSave] = useState<SaveState>({ step: "idle" });
   const menuRef = useRef<HTMLDivElement>(null);
   const fetchRef = useRef<AbortController | null>(null);
+  const favorites = albums.find((album) => album.kind === "favorites");
+  const isFavorite = favorites?.photo_ids.includes(photo.id) ?? false;
+  const customAlbums = albums.filter((album) => album.kind === "custom");
 
   const close = useCallback(() => {
     fetchRef.current?.abort();
     fetchRef.current = null;
     setSave({ step: "idle" });
+    setPane("main");
     setOpen(false);
   }, []);
 
@@ -507,7 +788,39 @@ function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () =
       >
         <Ellipsis className="icon" aria-hidden="true" />
       </button>
-      {open && (
+      {open && pane === "albums" && (
+        <div className="menu-list album-picker" role="menu">
+          <button className="menu-item" role="menuitem" onClick={() => setPane("main")}>
+            <ChevronLeft className="icon" aria-hidden="true" /> Back
+          </button>
+          {customAlbums.map((album) => {
+            const included = album.photo_ids.includes(photo.id);
+            return (
+              <button
+                key={album.key}
+                className="menu-item"
+                role="menuitemcheckbox"
+                aria-checked={included}
+                onClick={() => void onSetInAlbum(album, !included)}
+              >
+                <Check className={`icon ${included ? "" : "unchecked"}`} aria-hidden="true" />
+                <span className="menu-label" title={album.name}>{album.name}</span>
+              </button>
+            );
+          })}
+          <button
+            className="menu-item"
+            role="menuitem"
+            onClick={() => {
+              close();
+              onCreateAlbum();
+            }}
+          >
+            <Plus className="icon" aria-hidden="true" /> New album…
+          </button>
+        </div>
+      )}
+      {open && pane === "main" && (
         <div className="menu-list" role="menu">
           {save.step === "ready" ? (
             <button className="menu-item" role="menuitem" onClick={() => void share(save.file).then(close)}>
@@ -520,6 +833,34 @@ function PhotoMenu({ photo, onMoveToTrash }: { photo: Photo; onMoveToTrash: () =
               ) : (
                 <><Download className="icon" aria-hidden="true" /> {canSaveToPhotos ? "Save to Photos" : "Download"}</>
               )}
+            </button>
+          )}
+          {favorites && (
+            <button
+              className="menu-item"
+              role="menuitem"
+              onClick={() => {
+                close();
+                void onSetInAlbum(favorites, !isFavorite);
+              }}
+            >
+              <Heart className="icon" fill={isFavorite ? "currentColor" : "none"} aria-hidden="true" />
+              {isFavorite ? "Remove from Favorites" : "Add to Favorites"}
+            </button>
+          )}
+          <button className="menu-item" role="menuitem" onClick={() => setPane("albums")}>
+            <FolderPlus className="icon" aria-hidden="true" /> Add to album…
+          </button>
+          {currentAlbum?.kind === "custom" && (
+            <button
+              className="menu-item"
+              role="menuitem"
+              onClick={() => {
+                close();
+                void onSetInAlbum(currentAlbum, false);
+              }}
+            >
+              <FolderMinus className="icon" aria-hidden="true" /> Remove from this album
             </button>
           )}
           <button

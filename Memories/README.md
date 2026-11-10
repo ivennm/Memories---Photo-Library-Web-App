@@ -15,6 +15,8 @@ A private, self-hosted photo and video library for family members on your Tailsc
 
 **iPhone photos.** HEIC/HEIF (and TIFF) photos are stored untouched, and a JPEG display copy is saved under `MEDIA_ROOT/_previews/` so they show in every browser. Downloads always return the original file. Display copies can be regenerated from originals, but are included when you copy `MEDIA_ROOT`.
 
+**Albums.** The Albums tab is shared by the whole family. **Favorites** is made automatically and starts empty; there is one **Uploaded by <name>** album per person, filled automatically from who uploaded each item. Neither kind can be renamed or deleted. Anyone can create, rename and delete their own albums and add items with the "…" menu (Add to Favorites, Add to album). Albums only point at items, so nothing is copied, an item can be in several albums, and deleting an album never deletes photos. Items in Recently deleted are hidden from albums and return if restored. **Upload photos** on an album page uploads straight into that album, which is how to bring over an album from iPhone Photos (in the picker: Albums, open the album, drag across the photos to select them all). Files already in Memories are added to the album instead of being refused, and ones in Recently deleted are restored, so no copies are made and re-running an interrupted upload is safe.
+
 **Duplicates.** Detection uses SHA-256, so it catches byte-identical files, not resized or recompressed copies. Re-uploading a file that is in Recently deleted shows a notice with a Restore button.
 
 ## Accounts
@@ -110,7 +112,7 @@ Run Gunicorn under `systemd` (not Flask's development server). Gunicorn listens 
 
    The library is then at `https://<server-name>.<tailnet>.ts.net` for devices on your tailnet. Do not use `tailscale funnel`, which would expose it to the public internet.
 
-To update the app later: rebuild the frontend and run `sudo deploy/install.sh` again. It replaces the code, updates packages and restarts the service; it never overwrites the database, media or `/etc/memories.env`.
+To update the app later, run `./update.sh` from the project folder as your normal user (not with sudo). It runs the tests, rebuilds the frontend, runs `sudo deploy/install.sh` and checks the site answers; `--skip-tests` skips the tests. Doing it by hand: rebuild the frontend and run `sudo deploy/install.sh` again. It replaces the code, updates packages and restarts the service; it never overwrites the database, media or `/etc/memories.env`.
 
 For development test runs alongside the service, use a separate `DATABASE_PATH` and `MEDIA_ROOT` under `data/` (the media folder on the drive belongs to the `memories` account after install).
 
@@ -131,4 +133,4 @@ To move the library to another drive later: stop the app, copy the contents of `
 
 ## Current boundaries
 
-Not yet included: video capture dates, video conversion for browsers that cannot play iPhone HEVC video, thumbnails, albums, search and filters, login rate limiting, and a guided storage-migration tool.
+Not yet included: video capture dates, video conversion for browsers that cannot play iPhone HEVC video, search and filters, login rate limiting, and a guided storage-migration tool.

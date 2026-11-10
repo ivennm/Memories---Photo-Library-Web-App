@@ -79,6 +79,24 @@ CREATE TABLE IF NOT EXISTS invites (
     used_by INTEGER REFERENCES users(id),
     revoked_at TEXT
 );
+-- Albums are shared by the whole family. kind is 'favorites' (one, made automatically, can't be
+-- renamed or deleted) or 'custom'. "Uploaded by" albums aren't stored; they come from uploaded_by.
+CREATE TABLE IF NOT EXISTS albums (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    kind TEXT NOT NULL DEFAULT 'custom',
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL
+);
+-- Which items are in which album. The files aren't copied; an item can be in many albums.
+CREATE TABLE IF NOT EXISTS album_photos (
+    album_id INTEGER NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    added_by INTEGER REFERENCES users(id),
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (album_id, photo_id)
+);
+CREATE INDEX IF NOT EXISTS album_photos_photo ON album_photos(photo_id);
 """
 # Columns added after the first release, applied to existing databases on startup.
 ADDED_COLUMNS = {
@@ -136,6 +154,12 @@ def credential_error(username: str | None, password: str | None) -> str | None:
     return None
 
 
+def album_name_error(name: str) -> str | None:
+    if not 1 <= len(name) <= 60:
+        return "Album names must be 1 to 60 characters."
+    return None
+
+
 def invite_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -151,6 +175,11 @@ def migrate(connection: sqlite3.Connection) -> None:
     if not connection.execute("SELECT 1 FROM users WHERE is_admin = 1").fetchone():
         connection.execute(
             "UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)"
+        )
+    if not connection.execute("SELECT 1 FROM albums WHERE kind = 'favorites'").fetchone():
+        connection.execute(
+            "INSERT INTO albums (name, kind, created_at) VALUES ('Favorites', 'favorites', ?)",
+            (iso_timestamp(utc_now()),),
         )
 
 
@@ -282,7 +311,17 @@ def create_app() -> Flask:
         ):
             if relative_path and (path := media_path(relative_path)) is not None:
                 path.unlink(missing_ok=True)
+        connection.execute("DELETE FROM album_photos WHERE photo_id = ?", (row["id"],))
         connection.execute("DELETE FROM photos WHERE id = ?", (row["id"],))
+
+    def add_to_album_row(connection: sqlite3.Connection, album_id: int, photo_id: str, user_id: int) -> None:
+        connection.execute(
+            """
+            INSERT INTO album_photos (album_id, photo_id, added_by, added_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (album_id, photo_id, user_id, iso_timestamp(utc_now())),
+        )
 
     def duplicate_response(row: sqlite3.Row) -> tuple[Any, int]:
         if row["deleted_at"] is not None:
@@ -440,6 +479,29 @@ def create_app() -> Flask:
         if not media_drive_available():
             logger.error("Upload refused: media drive is not mounted at %s", media_mount)
             return jsonify({"error": "The photo library drive is unavailable. Try again later."}), 503
+        # Optional: also put the item in this album (for uploading a whole album from a phone).
+        album_id: int | None = None
+        if raw_album_id := request.form.get("album_id"):
+            album = database().execute(
+                "SELECT id FROM albums WHERE id = ?",
+                (int(raw_album_id) if raw_album_id.isdigit() else -1,),
+            ).fetchone()
+            if album is None:
+                return jsonify({"error": "Album not found."}), 404
+            album_id = album["id"]
+
+        def existing_response(row: sqlite3.Row) -> tuple[Any, int]:
+            """A file that is already in the library: refused, or added to the album if one was given
+            (restored first if it was in Recently deleted), so re-uploading an album never makes copies."""
+            if album_id is None:
+                return duplicate_response(row)
+            connection = database()
+            restored = row["deleted_at"] is not None
+            if restored:
+                connection.execute("UPDATE photos SET deleted_at = NULL WHERE id = ?", (row["id"],))
+            add_to_album_row(connection, album_id, row["id"], user["id"])
+            connection.commit()
+            return jsonify({"status": "already_in_library", "id": row["id"], "restored": restored}), 200
 
         photo_id = uuid.uuid4().hex
         temp_path = media_root / f".upload-{uuid.uuid4().hex}.tmp"
@@ -461,7 +523,7 @@ def create_app() -> Flask:
                 "SELECT id, original_name, deleted_at FROM photos WHERE sha256 = ?"
             )
             if existing := connection.execute(find_existing, (checksum,)).fetchone():
-                return duplicate_response(existing)
+                return existing_response(existing)
 
             uploaded_at = utc_now()
             taken_at = uploaded_at.astimezone()
@@ -526,7 +588,9 @@ def create_app() -> Flask:
             )
             if cursor.rowcount == 0:
                 connection.rollback()
-                return duplicate_response(connection.execute(find_existing, (checksum,)).fetchone())
+                return existing_response(connection.execute(find_existing, (checksum,)).fetchone())
+            if album_id is not None:
+                add_to_album_row(connection, album_id, photo_id, user["id"])
             connection.commit()
             committed = True
             return jsonify({"status": "uploaded", "id": photo_id}), 201
@@ -611,6 +675,138 @@ def create_app() -> Flask:
         erase_photo(connection, row)
         connection.commit()
         return jsonify({"status": "deleted"}), 200
+
+    @app.get("/api/albums")
+    def list_albums() -> tuple[Any, int]:
+        """Every album with the ids of its items, newest first. Items in the trash are left out
+        (they come back if restored)."""
+        require_user()
+        connection = database()
+        members: dict[int, list[str]] = {}
+        for row in connection.execute(
+            """
+            SELECT album_photos.album_id, photos.id AS photo_id
+            FROM album_photos JOIN photos ON photos.id = album_photos.photo_id
+            WHERE photos.deleted_at IS NULL
+            ORDER BY photos.taken_at DESC, photos.uploaded_at DESC
+            """
+        ):
+            members.setdefault(row["album_id"], []).append(row["photo_id"])
+        uploads: dict[int, list[str]] = {}
+        for row in connection.execute(
+            """
+            SELECT uploaded_by, id FROM photos WHERE deleted_at IS NULL
+            ORDER BY taken_at DESC, uploaded_at DESC
+            """
+        ):
+            uploads.setdefault(row["uploaded_by"], []).append(row["id"])
+
+        albums = [
+            {
+                "key": f"album-{row['id']}",
+                "id": row["id"],
+                "kind": row["kind"],
+                "name": row["name"],
+                "photo_ids": members.get(row["id"], []),
+            }
+            for row in connection.execute(
+                "SELECT id, name, kind FROM albums ORDER BY kind != 'favorites', name COLLATE NOCASE"
+            )
+        ]
+        for user in connection.execute(
+            "SELECT id, username, removed_at FROM users ORDER BY username COLLATE NOCASE"
+        ):
+            # Removed accounts keep an album only while their uploads are still in the library.
+            if user["removed_at"] and not uploads.get(user["id"]):
+                continue
+            albums.append({
+                "key": f"uploader-{user['id']}",
+                "id": None,
+                "kind": "uploader",
+                "name": f"Uploaded by {user['username']}",
+                "photo_ids": uploads.get(user["id"], []),
+            })
+        return jsonify(albums), 200
+
+    def album_row(album_id: int) -> sqlite3.Row:
+        row = database().execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
+        if row is None:
+            abort(404, "Album not found.")
+        return row
+
+    def custom_album_row(album_id: int) -> sqlite3.Row:
+        row = album_row(album_id)
+        if row["kind"] != "custom":
+            abort(400, f"{row['name']} can't be renamed or deleted.")
+        return row
+
+    @app.post("/api/albums")
+    def create_album() -> tuple[Any, int]:
+        user = require_user()
+        name = str(request_json().get("name", "")).strip()
+        if error := album_name_error(name):
+            return jsonify({"error": error}), 400
+        connection = database()
+        try:
+            cursor = connection.execute(
+                "INSERT INTO albums (name, created_by, created_at) VALUES (?, ?, ?)",
+                (name, user["id"], iso_timestamp(utc_now())),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "There is already an album with that name."}), 409
+        return jsonify({"id": cursor.lastrowid, "key": f"album-{cursor.lastrowid}", "name": name}), 201
+
+    @app.patch("/api/albums/<int:album_id>")
+    def rename_album(album_id: int) -> tuple[Any, int]:
+        require_user()
+        custom_album_row(album_id)
+        name = str(request_json().get("name", "")).strip()
+        if error := album_name_error(name):
+            return jsonify({"error": error}), 400
+        connection = database()
+        try:
+            connection.execute("UPDATE albums SET name = ? WHERE id = ?", (name, album_id))
+            connection.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "There is already an album with that name."}), 409
+        return jsonify({"name": name}), 200
+
+    @app.delete("/api/albums/<int:album_id>")
+    def delete_album(album_id: int) -> tuple[Any, int]:
+        """Deletes the album only; its photos and videos stay in the library."""
+        require_user()
+        custom_album_row(album_id)
+        connection = database()
+        connection.execute("DELETE FROM album_photos WHERE album_id = ?", (album_id,))
+        connection.execute("DELETE FROM albums WHERE id = ?", (album_id,))
+        connection.commit()
+        return jsonify({"status": "deleted"}), 200
+
+    @app.post("/api/albums/<int:album_id>/photos")
+    def add_to_album(album_id: int) -> tuple[Any, int]:
+        user = require_user()
+        album_row(album_id)
+        photo_id = str(request_json().get("photo_id", ""))
+        connection = database()
+        if not connection.execute(
+            "SELECT 1 FROM photos WHERE id = ? AND deleted_at IS NULL", (photo_id,)
+        ).fetchone():
+            return jsonify({"error": "Photo not found."}), 404
+        add_to_album_row(connection, album_id, photo_id, user["id"])
+        connection.commit()
+        return jsonify({"status": "added"}), 200
+
+    @app.delete("/api/albums/<int:album_id>/photos/<photo_id>")
+    def remove_from_album(album_id: int, photo_id: str) -> tuple[Any, int]:
+        require_user()
+        album_row(album_id)
+        connection = database()
+        connection.execute(
+            "DELETE FROM album_photos WHERE album_id = ? AND photo_id = ?", (album_id, photo_id)
+        )
+        connection.commit()
+        return jsonify({"status": "removed"}), 200
 
     @app.get("/api/admin/users")
     def list_users() -> tuple[Any, int]:
