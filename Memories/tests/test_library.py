@@ -250,6 +250,41 @@ def test_first_account_is_the_only_admin(client, app):
     ).status_code == 403
 
 
+def session_cookie_expiry(response):
+    """The session cookie's expiry date, or None for a cookie that ends when the browser closes."""
+    from http.cookies import SimpleCookie
+
+    for header in response.headers.getlist("Set-Cookie"):
+        cookie = SimpleCookie(header).get("session")
+        if cookie is not None:
+            expires = cookie["expires"]
+            return datetime.strptime(expires, "%a, %d %b %Y %H:%M:%S GMT").replace(
+                tzinfo=timezone.utc
+            ) if expires else None
+    raise AssertionError("no session cookie in the response")
+
+
+def test_sign_in_lasts_30_days_and_renews_on_each_visit(client, app):
+    response = establish_first_user(client)
+    now = datetime.now(timezone.utc)
+    assert session_cookie_expiry(response) - now > timedelta(days=29)
+    client.post("/api/logout")
+
+    response = client.post("/api/login", json={"username": "family", "password": "a-long-test-password"})
+    assert session_cookie_expiry(response) - now > timedelta(days=29)
+    # Opening the app again sends a fresh 30-day expiry.
+    assert session_cookie_expiry(client.get("/api/photos")) - now > timedelta(days=29)
+
+
+def test_existing_browser_session_is_upgraded_to_30_days(client, app):
+    establish_first_user(client)
+    with client.session_transaction() as old_session:
+        old_session.permanent = False  # signed in before sessions had an expiry date
+    response = client.get("/api/session")
+    assert response.json["authenticated"] is True
+    assert session_cookie_expiry(response) - datetime.now(timezone.utc) > timedelta(days=29)
+
+
 def test_admin_resets_password_and_signs_out_old_sessions(client, app):
     assert establish_first_user(client).status_code == 201
     mom = make_family_member(client)

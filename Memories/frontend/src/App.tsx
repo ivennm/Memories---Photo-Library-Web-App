@@ -348,7 +348,7 @@ function App() {
             {showTrash && (
               <p className="trash-note">
                 Items are permanently removed 30 days after deletion.
-                {session.is_admin && " As admin, you can also delete them forever now."}
+                {session.is_admin && ""}
               </p>
             )}
             {visiblePhotos.length === 0 ? (

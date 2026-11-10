@@ -39,6 +39,8 @@ DISPLAY_COPY_MAX_EDGE = 2560
 DISPLAY_COPY_DIRECTORY = "_previews"
 TRASH_RETENTION = timedelta(days=30)
 INVITE_LIFETIME = timedelta(days=7)
+# How long a device stays signed in without being used; every visit restarts the 30 days.
+SESSION_LIFETIME = timedelta(days=30)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
@@ -172,6 +174,9 @@ def create_app() -> Flask:
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    # Without an expiry date the cookie only lasts until the browser closes, which on iPhone is
+    # often; SESSION_REFRESH_EACH_REQUEST (on by default) renews it on every visit.
+    app.config["PERMANENT_SESSION_LIFETIME"] = SESSION_LIFETIME
     app.config["SESSION_COOKIE_SECURE"] = (
         os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true"
     )
@@ -216,6 +221,7 @@ def create_app() -> Flask:
 
     def sign_in(user_id: int, session_version: int) -> None:
         session.clear()
+        session.permanent = True
         session["user_id"] = user_id
         session["session_version"] = session_version
 
@@ -234,6 +240,8 @@ def create_app() -> Flask:
         if user is None or user["session_version"] != session.get("session_version"):
             session.clear()
             return None
+        # Sessions from before sign-ins lasted 30 days get the expiry date too.
+        session.permanent = True
         return user
 
     def require_user() -> sqlite3.Row:
