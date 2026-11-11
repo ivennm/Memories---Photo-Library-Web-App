@@ -1,7 +1,7 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, type TouchEvent as ReactTouchEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  Album as AlbumIcon, Check, ChevronLeft, CircleUser, Download, Ellipsis, FolderMinus, FolderPlus, Heart,
-  Images, LoaderCircle, Plus, Trash, Trash2, Users,
+  Album as AlbumIcon, Check, ChevronLeft, ChevronRight, CircleUser, Download, Ellipsis, EyeOff, FolderMinus, FolderPlus, Heart,
+  Images, LoaderCircle, Play, Plus, Trash, Trash2, Users, X,
 } from "lucide-react";
 
 type Session = {
@@ -24,6 +24,8 @@ type Photo = {
   original_url: string;
   thumbnail_url: string | null;
   processing: "pending" | "done" | "failed";
+  // False when the item is in an album set to not show in All photos; it then only shows in albums.
+  in_all_photos: boolean;
 };
 
 type Account = {
@@ -54,6 +56,8 @@ type AlbumInfo = {
   id: number | null;
   kind: "favorites" | "custom" | "uploader";
   name: string;
+  // Custom albums can be set to keep their items out of All photos (and the "Uploaded by" albums).
+  show_in_library: boolean;
   photo_ids: string[];
 };
 
@@ -85,6 +89,47 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// Uploads one file, reporting how much has been sent (0 to 1). fetch() can't report upload
+// progress, so this uses XMLHttpRequest; errors are thrown as ApiError, like api().
+function uploadWithProgress<T>(data: FormData, onProgress: (fraction: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/photos");
+    request.responseType = "json";
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total);
+    };
+    request.onload = () => {
+      const body = (request.response ?? {}) as ApiError["body"] & T;
+      if (request.status >= 200 && request.status < 300) resolve(body);
+      else reject(new ApiError(body.error ?? `Request failed (${request.status}).`, request.status, body));
+    };
+    request.onerror = () => reject(new Error("The upload was interrupted. Check the connection and try again."));
+    request.send(data);
+  });
+}
+
+// iPhones and iPads (iPads report themselves as a Mac, but have a touch screen).
+const isAppleTouchDevice =
+  /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+
+// With the picker's default "Automatic" format, iPhone converts every file before handing any of
+// them over, which can take minutes with no progress shown. "Current" sends the originals at once.
+function IphoneUploadTip({ onDismiss }: { onDismiss?: () => void }) {
+  if (!isAppleTouchDevice) return null;
+  return (
+    <p className="upload-tip">
+      <span>
+        <strong>Uploading from iPhone?</strong> In the photo picker, tap <strong>Options</strong> and choose{" "}
+        <strong>Current</strong>. It's much faster and keeps the original photos and videos. Keep the screen on until the upload finishes.
+      </span>
+      {onDismiss && <button className="text-button" onClick={onDismiss}>Got it</button>}
+    </p>
+  );
+}
+
+const TIP_DISMISSED_KEY = "memories.iphoneTipDismissed";
+
 // iOS converts photos to JPEG unless HEIC is listed explicitly; keep the originals.
 const ACCEPTED_FILES = "image/*,video/*,.heic,.heif,image/heic,image/heif";
 
@@ -108,6 +153,22 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   // The album the next picked files go into (null = just the library).
   const uploadAlbumRef = useRef<AlbumInfo | null>(null);
+  // The iPhone upload tip shows in All photos until dismissed (remembered on this device only).
+  const [tipDismissed, setTipDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(TIP_DISMISSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  function dismissTip() {
+    setTipDismissed(true);
+    try {
+      localStorage.setItem(TIP_DISMISSED_KEY, "1");
+    } catch {
+      // Private browsing: it stays hidden until the page is reloaded.
+    }
+  }
 
   const refresh = useCallback(async () => {
     const current = await api<Session>("/api/session");
@@ -187,14 +248,24 @@ function App() {
     // Into an album: files already in Memories are added to it instead of being refused.
     let alreadyInLibrary = 0;
     let restored = 0;
+    // Progress is by size across the whole batch, so one big video doesn't look stuck.
+    const totalBytes = selected.reduce((sum, file) => sum + file.size, 0) || 1;
+    let finishedBytes = 0;
     try {
       for (const [index, file] of selected.entries()) {
-        setUploadStatus(selected.length > 1 ? `Uploading ${index + 1} of ${selected.length}…` : "Uploading…");
+        const showProgress = (fraction: number) => {
+          const percent = Math.min(99, Math.floor(((finishedBytes + fraction * file.size) / totalBytes) * 100));
+          setUploadStatus(
+            selected.length > 1 ? `Uploading ${index + 1} of ${selected.length} · ${percent}%` : `Uploading… ${percent}%`,
+          );
+        };
+        showProgress(0);
         const data = new FormData();
         data.append("file", file);
         if (album?.id != null) data.append("album_id", String(album.id));
         try {
-          const result = await api<{ status: string; restored?: boolean }>("/api/photos", { method: "POST", body: data });
+          const result = await uploadWithProgress<{ status: string; restored?: boolean }>(data, showProgress);
+          finishedBytes += file.size;
           if (result.status === "already_in_library") {
             alreadyInLibrary += 1;
             if (result.restored) restored += 1;
@@ -203,6 +274,7 @@ function App() {
           }
         } catch (reason) {
           if (reason instanceof ApiError && reason.status === 401) throw reason;
+          finishedBytes += file.size;
           const trashedPhotoId =
             reason instanceof ApiError && reason.body.code === "in_trash" ? reason.body.photo_id : undefined;
           newNotices.push({
@@ -278,6 +350,16 @@ function App() {
       await (include
         ? api(`/api/albums/${album.id}/photos`, { method: "POST", body: JSON.stringify({ photo_id: photo.id }) })
         : api(`/api/albums/${album.id}/photos/${photo.id}`, { method: "DELETE" }));
+      if (include && !album.show_in_library) {
+        // Otherwise the item seems to vanish from All photos for no reason.
+        setNotices((current) => [
+          ...current.filter((notice) => notice.key !== `hidden-${photo.id}`),
+          {
+            key: `hidden-${photo.id}`,
+            message: `Added ${photo.original_name} to ${album.name}. That album isn't shown in All photos, so it now appears only in its albums.`,
+          },
+        ]);
+      }
       await refresh();
       return true;
     } catch (reason) {
@@ -324,6 +406,16 @@ function App() {
     setError("");
     try {
       await api(`/api/albums/${album.id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+      await refresh();
+    } catch (reason) {
+      showError(reason);
+    }
+  }
+
+  async function setAlbumShownInLibrary(album: AlbumInfo, show: boolean) {
+    setError("");
+    try {
+      await api(`/api/albums/${album.id}`, { method: "PATCH", body: JSON.stringify({ show_in_library: show }) });
       await refresh();
     } catch (reason) {
       showError(reason);
@@ -399,7 +491,9 @@ function App() {
   }
 
   const showTrash = view === "trash";
-  const visiblePhotos = showTrash ? trash : photos;
+  // photos also has items kept only in their albums; albums look them up here.
+  const libraryPhotos = photos.filter((photo) => photo.in_all_photos);
+  const visiblePhotos = showTrash ? trash : libraryPhotos;
   const photosById = new Map(photos.map((photo) => [photo.id, photo]));
   // Favorites and custom albums; "Uploaded by" albums fill themselves.
   const editableAlbums = albums.filter((album) => album.kind !== "uploader");
@@ -431,7 +525,7 @@ function App() {
         <a className="brand" href="#"><span className="brand-mark">M</span><span>Memories</span><span className="app-version">v{__APP_VERSION__}</span></a>
         <p className="side-label">LIBRARY</p>
         <button className={`nav-item ${view === "library" ? "selected" : ""}`} onClick={() => openView("library")}>
-          <Images className="icon" aria-hidden="true" /> All photos <span className="nav-count">{photos.length}</span>
+          <Images className="icon" aria-hidden="true" /> All photos <span className="nav-count">{libraryPhotos.length}</span>
         </button>
         <button className={`nav-item ${view === "albums" ? "selected" : ""}`} onClick={() => openView("albums")}>
           <AlbumIcon className="icon" aria-hidden="true" /> Albums <span className="nav-count">{albums.length}</span>
@@ -497,6 +591,7 @@ function App() {
               onRename={() => void renameAlbum(openAlbum)}
               onDelete={() => void deleteAlbum(openAlbum)}
               onUpload={() => chooseFiles(openAlbum)}
+              onShowInLibraryChange={(show) => void setAlbumShownInLibrary(openAlbum, show)}
               uploading={busy ? uploadStatus || "Uploading…" : null}
               renderActions={(photo) => libraryMenu(photo, openAlbum)}
             />
@@ -518,7 +613,10 @@ function App() {
                 {!showTrash && <button className="primary-button" onClick={() => chooseFiles()}>Choose photos</button>}
               </section>
             ) : (
-              <PhotoTimeline photos={visiblePhotos} renderActions={showTrash ? trashActions : (photo) => libraryMenu(photo)} />
+              <>
+                {!showTrash && !tipDismissed && <IphoneUploadTip onDismiss={dismissTip} />}
+                <PhotoTimeline photos={visiblePhotos} renderActions={showTrash ? trashActions : (photo) => libraryMenu(photo)} />
+              </>
             )}
           </>
         )}
@@ -527,14 +625,20 @@ function App() {
   );
 }
 
+const isVideo = (photo: Photo) => photo.content_type.startsWith("video/");
+
 // Photos and videos grouped by the month they were taken, with each card's actions supplied by the page.
+// Tapping a card opens the full-screen viewer, which steps through the items in the same order.
 function PhotoTimeline({ photos, renderActions }: { photos: Photo[]; renderActions: (photo: Photo) => ReactNode }) {
+  const [viewerId, setViewerId] = useState<string | null>(null);
   const groups = photos.reduce<Record<string, Photo[]>>((result, photo) => {
     const date = new Date(photo.taken_at);
     const key = date.toLocaleDateString(undefined, { year: "numeric", month: "long" });
     (result[key] ??= []).push(photo);
     return result;
   }, {});
+  // The order shown on screen (Recently deleted is sorted by deletion date, not by month).
+  const ordered = Object.values(groups).flat();
 
   return (
     <div className="timeline">
@@ -544,19 +648,16 @@ function PhotoTimeline({ photos, renderActions }: { photos: Photo[]; renderActio
           <div className="photo-grid">
             {items.map((photo) => (
               <article className="photo-card" key={photo.id}>
-                {photo.content_type.startsWith("video/") ? (
-                  // With a poster, nothing downloads until play is pressed.
-                  <video
-                    src={photo.content_url}
-                    poster={photo.thumbnail_url ?? undefined}
-                    controls
-                    playsInline
-                    preload={photo.thumbnail_url ? "none" : "metadata"}
-                  />
-                ) : (
-                  <img src={photo.thumbnail_url ?? photo.content_url} alt={photo.original_name} loading="lazy" />
-                )}
-                {photo.processing === "pending" && photo.content_type.startsWith("video/") && (
+                <button className="photo-open" onClick={() => setViewerId(photo.id)} aria-label={`Open ${photo.original_name}`}>
+                  {photo.thumbnail_url || !isVideo(photo) ? (
+                    <img src={photo.thumbnail_url ?? photo.content_url} alt={photo.original_name} loading="lazy" />
+                  ) : (
+                    // A new video without a poster frame yet: the browser shows its first frame.
+                    <video src={photo.content_url} muted playsInline preload="metadata" />
+                  )}
+                  {isVideo(photo) && <span className="play-badge"><Play className="icon" fill="currentColor" aria-hidden="true" /></span>}
+                </button>
+                {photo.processing === "pending" && isVideo(photo) && (
                   <span className="processing-badge">Processing…</span>
                 )}
                 <div className="photo-details">
@@ -571,6 +672,191 @@ function PhotoTimeline({ photos, renderActions }: { photos: Photo[]; renderActio
           </div>
         </section>
       ))}
+      {viewerId !== null && (
+        <PhotoViewer photos={ordered} startId={viewerId} renderActions={renderActions} onClosed={() => setViewerId(null)} />
+      )}
+    </div>
+  );
+}
+
+// Full-screen viewer, like the iPhone Photos app: swipe sideways (or arrow keys / buttons on a computer)
+// to move through the items, swipe down or press Escape to close, tap a photo to hide the bars.
+// Opening it adds a browser history entry, so the phone's Back gesture closes it instead of leaving the app.
+function PhotoViewer({ photos, startId, renderActions, onClosed }: {
+  photos: Photo[];
+  startId: string;
+  renderActions: (photo: Photo) => ReactNode;
+  onClosed: () => void;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [currentId, setCurrentId] = useState(startId);
+  const [barsHidden, setBarsHidden] = useState(false);
+  const indexRef = useRef(Math.max(0, photos.findIndex((photo) => photo.id === startId)));
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  const foundIndex = photos.findIndex((photo) => photo.id === currentId);
+  // If the current item left the list (moved to trash, removed from the album), show its neighbour.
+  const index = foundIndex >= 0 ? foundIndex : Math.min(indexRef.current, photos.length - 1);
+  const current = photos[index];
+  const photoIds = photos.map((photo) => photo.id).join(",");
+
+  // The parent passes a new function on every render; keep the latest without re-running effects.
+  const onClosedRef = useRef(onClosed);
+  onClosedRef.current = onClosed;
+  const close = useCallback(() => {
+    if ((window.history.state as { memoriesViewer?: boolean } | null)?.memoriesViewer) window.history.back();
+    else onClosedRef.current();
+  }, []);
+
+  useEffect(() => {
+    if (!(window.history.state as { memoriesViewer?: boolean } | null)?.memoriesViewer) {
+      window.history.pushState({ memoriesViewer: true }, "");
+    }
+    const onBack = () => onClosedRef.current();
+    window.addEventListener("popstate", onBack);
+    // The page behind stays where it was.
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("popstate", onBack);
+      document.body.style.overflow = overflow;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (photos.length === 0) close();
+  }, [photos.length, close]);
+
+  // Keep the track on the current item when opening, when the list changes and when the phone rotates.
+  useLayoutEffect(() => {
+    const track = trackRef.current;
+    if (!track || index < 0) return;
+    indexRef.current = index;
+    if (current && current.id !== currentId) setCurrentId(current.id);
+    const place = () => {
+      track.scrollLeft = indexRef.current * track.clientWidth;
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+    // Only when the items change (not on every re-render); scrolling itself updates currentId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photoIds]);
+
+  function onScroll() {
+    const track = trackRef.current;
+    if (!track || track.clientWidth === 0) return;
+    const next = Math.round(track.scrollLeft / track.clientWidth);
+    if (next !== indexRef.current && photos[next]) {
+      indexRef.current = next;
+      setCurrentId(photos[next].id);
+    }
+  }
+
+  const go = useCallback((step: number) => {
+    const track = trackRef.current;
+    const next = indexRef.current + step;
+    if (!track || next < 0 || next >= photos.length) return;
+    track.scrollTo({ left: next * track.clientWidth, behavior: "smooth" });
+  }, [photos.length]);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      // The "..." menu handles its own Escape.
+      if (event.key === "Escape" && !document.querySelector(".viewer .menu-list")) close();
+      else if (event.key === "ArrowLeft") go(-1);
+      else if (event.key === "ArrowRight") go(1);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [close, go]);
+
+  // Only the item on screen plays.
+  useEffect(() => {
+    trackRef.current?.querySelectorAll("video").forEach((video) => {
+      if (video.dataset.id !== currentId && !video.paused) video.pause();
+    });
+  }, [currentId]);
+
+  function onTouchStart(event: ReactTouchEvent) {
+    touchStart.current = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  }
+
+  function onTouchEnd(event: ReactTouchEvent) {
+    const start = touchStart.current;
+    touchStart.current = null;
+    if (!start || event.changedTouches.length !== 1) return;
+    const dx = event.changedTouches[0].clientX - start.x;
+    const dy = event.changedTouches[0].clientY - start.y;
+    if (dy > 90 && Math.abs(dx) < dy / 2) close();
+  }
+
+  if (!current) return null;
+  const takenAt = new Date(current.taken_at);
+
+  return (
+    <div className={`viewer ${barsHidden ? "bars-hidden" : ""}`} role="dialog" aria-modal="true" aria-label="Photo viewer">
+      <header className="viewer-bar">
+        <button className="viewer-button" onClick={close} aria-label="Close" title="Close (Esc)">
+          <X className="icon" aria-hidden="true" />
+        </button>
+        <div className="viewer-caption">
+          <strong>{takenAt.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })}</strong>
+          <span>
+            {takenAt.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} · {current.uploaded_by} · {index + 1} of {photos.length}
+          </span>
+        </div>
+        <div className="viewer-actions">{renderActions(current)}</div>
+      </header>
+      <div className="viewer-track" ref={trackRef} onScroll={onScroll} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+        {photos.map((photo, position) => (
+          <div className="viewer-slide" key={photo.id}>
+            {/* Only the items next to the one on screen are loaded. */}
+            {Math.abs(position - index) <= 1 && (
+              isVideo(photo) ? (
+                <video
+                  data-id={photo.id}
+                  src={photo.content_url}
+                  poster={photo.thumbnail_url ?? undefined}
+                  controls
+                  playsInline
+                  preload={position === index ? "metadata" : "none"}
+                  // The one that was tapped in the grid starts playing.
+                  autoPlay={photo.id === startId}
+                />
+              ) : (
+                <ViewerImage photo={photo} onTap={() => setBarsHidden((hidden) => !hidden)} />
+              )
+            )}
+          </div>
+        ))}
+      </div>
+      {index > 0 && (
+        <button className="viewer-button viewer-prev" onClick={() => go(-1)} aria-label="Previous" title="Previous (←)">
+          <ChevronLeft className="icon" aria-hidden="true" />
+        </button>
+      )}
+      {index < photos.length - 1 && (
+        <button className="viewer-button viewer-next" onClick={() => go(1)} aria-label="Next" title="Next (→)">
+          <ChevronRight className="icon" aria-hidden="true" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The thumbnail shows at once (it's usually cached from the grid); the full-size photo fades in over it.
+function ViewerImage({ photo, onTap }: { photo: Photo; onTap: () => void }) {
+  const [loaded, setLoaded] = useState(false);
+  return (
+    <div className="viewer-image" onClick={onTap}>
+      {photo.thumbnail_url && !loaded && <img src={photo.thumbnail_url} alt="" aria-hidden="true" />}
+      <img
+        className={loaded || !photo.thumbnail_url ? "" : "loading"}
+        src={photo.content_url}
+        alt={photo.original_name}
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+      />
     </div>
   );
 }
@@ -601,7 +887,10 @@ function AlbumList({ albums, photosById, onOpen, onCreate }: {
     <button className="album-card" key={album.key} onClick={() => onOpen(album.key)}>
       <AlbumCover photo={photosById.get(album.photo_ids[0])} kind={album.kind} />
       <span className="album-name" title={album.name}>{album.name}</span>
-      <span className="album-count">{itemCount(album.photo_ids.length)}</span>
+      <span className="album-count">
+        {itemCount(album.photo_ids.length)}
+        {!album.show_in_library && <><EyeOff className="icon" aria-hidden="true" /> Not in All photos</>}
+      </span>
     </button>
   );
 
@@ -626,13 +915,14 @@ function AlbumList({ albums, photosById, onOpen, onCreate }: {
   );
 }
 
-function AlbumDetail({ album, photos, onBack, onRename, onDelete, onUpload, uploading, renderActions }: {
+function AlbumDetail({ album, photos, onBack, onRename, onDelete, onUpload, onShowInLibraryChange, uploading, renderActions }: {
   album: AlbumInfo;
   photos: Photo[];
   onBack: () => void;
   onRename: () => void;
   onDelete: () => void;
   onUpload: () => void;
+  onShowInLibraryChange: (show: boolean) => void;
   // The upload progress text while uploading, otherwise null.
   uploading: string | null;
   renderActions: (photo: Photo) => ReactNode;
@@ -663,6 +953,24 @@ function AlbumDetail({ album, photos, onBack, onRename, onDelete, onUpload, uplo
             <button className="text-button delete-button" onClick={onDelete}>Delete album</button>
           </span>
         )}
+        {album.kind === "custom" && (
+          <div className="album-setting">
+            <label>
+              <input
+                type="checkbox"
+                checked={album.show_in_library}
+                onChange={(event) => onShowInLibraryChange(event.target.checked)}
+              />
+              Show in All photos
+            </label>
+            <span>
+              {album.show_in_library
+                ? "Photos and videos in this album also appear in All photos."
+                : "Photos and videos in this album appear only in its albums, not in All photos or Uploaded by. Everyone in the family can still open this album."}
+            </span>
+          </div>
+        )}
+        {album.kind === "custom" && <IphoneUploadTip />}
       </div>
       {photos.length === 0 ? (
         <section className="empty-state">

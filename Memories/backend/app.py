@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS albums (
     name TEXT NOT NULL UNIQUE COLLATE NOCASE,
     kind TEXT NOT NULL DEFAULT 'custom',
     created_by INTEGER REFERENCES users(id),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- 0: the album's items are kept out of All photos and the "Uploaded by" albums.
+    show_in_library INTEGER NOT NULL DEFAULT 1
 );
 -- Which items are in which album. The files aren't copied; an item can be in many albums.
 CREATE TABLE IF NOT EXISTS album_photos (
@@ -112,7 +114,19 @@ ADDED_COLUMNS = {
         # Existing items start as pending, so the worker backfills their thumbnails and copies.
         "processing": "TEXT NOT NULL DEFAULT 'pending'",
     },
+    "albums": {
+        "show_in_library": "INTEGER NOT NULL DEFAULT 1",
+    },
 }
+
+
+# An item is left out of All photos when it is in any album set to not show in All photos.
+IN_ALL_PHOTOS_SQL = """
+    NOT EXISTS (
+        SELECT 1 FROM album_photos JOIN albums ON albums.id = album_photos.album_id
+        WHERE album_photos.photo_id = photos.id AND albums.show_in_library = 0
+    )
+"""
 
 
 def utc_now() -> datetime:
@@ -303,6 +317,7 @@ def create_app() -> Flask:
             "original_url": f"/api/photos/{row['id']}/original",
             "thumbnail_url": f"/api/photos/{row['id']}/thumbnail" if row["thumb_path"] else None,
             "processing": row["processing"],
+            "in_all_photos": bool(row["in_all_photos"]),
         }
 
     def erase_photo(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
@@ -330,11 +345,21 @@ def create_app() -> Flask:
                 "code": "in_trash",
                 "photo_id": row["id"],
             }), 409
-        return jsonify({
-            "error": "This exact file is already in the library.",
-            "code": "duplicate",
-            "photo_id": row["id"],
-        }), 409
+        hidden_in = database().execute(
+            """
+            SELECT albums.name FROM album_photos JOIN albums ON albums.id = album_photos.album_id
+            WHERE album_photos.photo_id = ? AND albums.show_in_library = 0
+            ORDER BY albums.name COLLATE NOCASE LIMIT 1
+            """,
+            (row["id"],),
+        ).fetchone()
+        message = "This exact file is already in the library."
+        if hidden_in:
+            message = (
+                f'This exact file is already in the library, in the album "{hidden_in["name"]}", '
+                "which isn't shown in All photos."
+            )
+        return jsonify({"error": message, "code": "duplicate", "photo_id": row["id"]}), 409
 
     @app.errorhandler(HTTPException)
     def api_error(error: HTTPException) -> Any:
@@ -417,10 +442,12 @@ def create_app() -> Flask:
 
     @app.get("/api/photos")
     def list_photos() -> tuple[Any, int]:
+        """Everything not in the trash, including items only shown in their albums
+        (in_all_photos false), which the app leaves out of All photos."""
         require_user()
         rows = database().execute(
-            """
-            SELECT photos.*, users.username
+            f"""
+            SELECT photos.*, users.username, {IN_ALL_PHOTOS_SQL} AS in_all_photos
             FROM photos JOIN users ON users.id = photos.uploaded_by
             WHERE photos.deleted_at IS NULL
             ORDER BY photos.taken_at DESC, photos.uploaded_at DESC
@@ -457,8 +484,8 @@ def create_app() -> Flask:
     def list_trash() -> tuple[Any, int]:
         require_user()
         rows = database().execute(
-            """
-            SELECT photos.*, users.username
+            f"""
+            SELECT photos.*, users.username, {IN_ALL_PHOTOS_SQL} AS in_all_photos
             FROM photos JOIN users ON users.id = photos.uploaded_by
             WHERE photos.deleted_at IS NOT NULL
             ORDER BY photos.deleted_at DESC
@@ -694,8 +721,8 @@ def create_app() -> Flask:
             members.setdefault(row["album_id"], []).append(row["photo_id"])
         uploads: dict[int, list[str]] = {}
         for row in connection.execute(
-            """
-            SELECT uploaded_by, id FROM photos WHERE deleted_at IS NULL
+            f"""
+            SELECT uploaded_by, id FROM photos WHERE deleted_at IS NULL AND {IN_ALL_PHOTOS_SQL}
             ORDER BY taken_at DESC, uploaded_at DESC
             """
         ):
@@ -707,10 +734,14 @@ def create_app() -> Flask:
                 "id": row["id"],
                 "kind": row["kind"],
                 "name": row["name"],
+                "show_in_library": bool(row["show_in_library"]),
                 "photo_ids": members.get(row["id"], []),
             }
             for row in connection.execute(
-                "SELECT id, name, kind FROM albums ORDER BY kind != 'favorites', name COLLATE NOCASE"
+                """
+                SELECT id, name, kind, show_in_library FROM albums
+                ORDER BY kind != 'favorites', name COLLATE NOCASE
+                """
             )
         ]
         for user in connection.execute(
@@ -724,6 +755,7 @@ def create_app() -> Flask:
                 "id": None,
                 "kind": "uploader",
                 "name": f"Uploaded by {user['username']}",
+                "show_in_library": True,
                 "photo_ids": uploads.get(user["id"], []),
             })
         return jsonify(albums), 200
@@ -737,7 +769,7 @@ def create_app() -> Flask:
     def custom_album_row(album_id: int) -> sqlite3.Row:
         row = album_row(album_id)
         if row["kind"] != "custom":
-            abort(400, f"{row['name']} can't be renamed or deleted.")
+            abort(400, f"{row['name']} can't be renamed, hidden or deleted.")
         return row
 
     @app.post("/api/albums")
@@ -758,19 +790,31 @@ def create_app() -> Flask:
         return jsonify({"id": cursor.lastrowid, "key": f"album-{cursor.lastrowid}", "name": name}), 201
 
     @app.patch("/api/albums/<int:album_id>")
-    def rename_album(album_id: int) -> tuple[Any, int]:
+    def update_album(album_id: int) -> tuple[Any, int]:
+        """Rename an album and/or choose whether its items also show in All photos."""
         require_user()
-        custom_album_row(album_id)
-        name = str(request_json().get("name", "")).strip()
-        if error := album_name_error(name):
-            return jsonify({"error": error}), 400
+        album = custom_album_row(album_id)
+        data = request_json()
+        name = album["name"]
+        if "name" in data:
+            name = str(data["name"]).strip()
+            if error := album_name_error(name):
+                return jsonify({"error": error}), 400
+        show_in_library = bool(album["show_in_library"])
+        if "show_in_library" in data:
+            if not isinstance(data["show_in_library"], bool):
+                return jsonify({"error": "show_in_library must be true or false."}), 400
+            show_in_library = data["show_in_library"]
         connection = database()
         try:
-            connection.execute("UPDATE albums SET name = ? WHERE id = ?", (name, album_id))
+            connection.execute(
+                "UPDATE albums SET name = ?, show_in_library = ? WHERE id = ?",
+                (name, int(show_in_library), album_id),
+            )
             connection.commit()
         except sqlite3.IntegrityError:
             return jsonify({"error": "There is already an album with that name."}), 409
-        return jsonify({"name": name}), 200
+        return jsonify({"name": name, "show_in_library": show_in_library}), 200
 
     @app.delete("/api/albums/<int:album_id>")
     def delete_album(album_id: int) -> tuple[Any, int]:

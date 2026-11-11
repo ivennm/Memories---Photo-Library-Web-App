@@ -712,3 +712,74 @@ def test_upload_into_album_adds_new_files_and_existing_ones_without_copies(clien
     assert upload_to_album(b"another", "x.jpg", album=9999).status_code == 404
     assert upload_to_album(b"another", "x.jpg", album="abc").status_code == 404
     assert len(client.get("/api/photos").json) == 3
+
+
+def in_all_photos(client):
+    return {photo["original_name"]: photo["in_all_photos"] for photo in client.get("/api/photos").json}
+
+
+def test_album_can_keep_its_items_out_of_all_photos(client, app):
+    establish_first_user(client)
+    upload(client, b"private photo", "private.jpg")
+    upload(client, b"both albums", "both.jpg")
+    upload(client, b"normal photo", "normal.jpg")
+    photos = {photo["original_name"]: photo["id"] for photo in client.get("/api/photos").json}
+    hidden = client.post("/api/albums", json={"name": "Just us"}).json["id"]
+    shown = client.post("/api/albums", json={"name": "Trip"}).json["id"]
+    favorites = albums_by_name(client)["Favorites"]["id"]
+    for album, name in ((hidden, "private.jpg"), (hidden, "both.jpg"), (shown, "both.jpg"),
+                        (favorites, "private.jpg")):
+        client.post(f"/api/albums/{album}/photos", json={"photo_id": photos[name]})
+    assert albums_by_name(client)["Just us"]["show_in_library"] is True  # on by default
+
+    response = client.patch(f"/api/albums/{hidden}", json={"show_in_library": False})
+    assert response.status_code == 200
+    assert response.json == {"name": "Just us", "show_in_library": False}
+    # Hiding wins when an item is also in a shown album.
+    assert in_all_photos(client) == {"private.jpg": False, "both.jpg": False, "normal.jpg": True}
+    albums = albums_by_name(client)
+    assert albums["Just us"]["show_in_library"] is False
+    assert len(albums["Just us"]["photo_ids"]) == 2  # still in the album itself
+    assert albums["Trip"]["photo_ids"] == [photos["both.jpg"]]
+    assert albums["Favorites"]["photo_ids"] == [photos["private.jpg"]]
+    assert albums["Uploaded by family"]["photo_ids"] == [photos["normal.jpg"]]
+
+    # Uploading an exact copy from All photos explains where the file is.
+    response = upload(client, b"private photo", "private-again.jpg")
+    assert response.status_code == 409
+    assert 'in the album "Just us"' in response.json["error"]
+
+    # Taking an item out of the hidden album, or turning the setting back on, shows it again.
+    client.delete(f"/api/albums/{hidden}/photos/{photos['both.jpg']}")
+    assert in_all_photos(client)["both.jpg"] is True
+    client.patch(f"/api/albums/{hidden}", json={"show_in_library": True})
+    assert all(in_all_photos(client).values())
+
+
+def test_upload_into_hidden_album_never_shows_in_all_photos(client):
+    establish_first_user(client)
+    album_id = client.post("/api/albums", json={"name": "Surprise"}).json["id"]
+    client.patch(f"/api/albums/{album_id}", json={"show_in_library": False})
+    response = client.post(
+        "/api/photos",
+        data={"file": (io.BytesIO(b"gift photo"), "gift.jpg"), "album_id": str(album_id)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 201
+    assert in_all_photos(client) == {"gift.jpg": False}
+    # Deleting the album brings its items back to All photos.
+    client.delete(f"/api/albums/{album_id}")
+    assert in_all_photos(client) == {"gift.jpg": True}
+
+
+def test_show_in_all_photos_setting_rules(client):
+    establish_first_user(client)
+    favorites = albums_by_name(client)["Favorites"]["id"]
+    assert client.patch(f"/api/albums/{favorites}", json={"show_in_library": False}).status_code == 400
+    album_id = client.post("/api/albums", json={"name": "Trip"}).json["id"]
+    assert client.patch(f"/api/albums/{album_id}", json={"show_in_library": "no"}).status_code == 400
+    # Renaming leaves the setting alone, and changing the setting leaves the name alone.
+    client.patch(f"/api/albums/{album_id}", json={"show_in_library": False})
+    client.patch(f"/api/albums/{album_id}", json={"name": "Trip 2026"})
+    album = albums_by_name(client)["Trip 2026"]
+    assert album["show_in_library"] is False
