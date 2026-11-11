@@ -197,3 +197,65 @@ def test_small_h264_with_pcm_audio_still_gets_a_copy(tmp_path):
     )
     assert not media.needs_stream_copy(media.probe(source), "mov")
     assert media.needs_stream_copy(media.probe(pcm), "mov")
+
+
+def test_compatible_download_of_video_is_the_mp4_streaming_copy(client, app, tmp_path):
+    contents = make_video(tmp_path / "clip.mov", "creation_time=2019-07-04T19:30:00Z", extra=("-f", "mov"))
+    assert upload(client, contents, "IMG_0002.MOV").status_code == 201
+    process_all(app)
+    video = client.get("/api/photos").json[0]
+    assert (video["compatible_name"], video["compatible_type"]) == ("IMG_0002.mp4", "video/mp4")
+    download = client.get(video["compatible_url"])
+    assert download.mimetype == "video/mp4"
+    assert "IMG_0002.mp4" in download.headers["Content-Disposition"]
+    saved = tmp_path / "downloaded.mp4"
+    saved.write_bytes(download.data)
+    info = media.probe(saved)
+    stream_info = media.video_stream(info)
+    assert stream_info["codec_name"] == "h264" and (stream_info["width"], stream_info["height"]) == (640, 1136)
+    # Saved to Photos, it lands on the day it was recorded.
+    assert media.video_capture_time(info) == datetime(2019, 7, 4, 19, 30, tzinfo=timezone.utc)
+    assert not list(app.config["MEDIA_ROOT"].glob(".download-*"))
+
+
+def test_compatible_download_adds_date_to_older_streaming_copies(client, app, tmp_path):
+    """Streaming copies made before they kept the recording date still download with it."""
+    contents = make_video(tmp_path / "clip.mov", "creation_time=2019-07-04T19:30:00Z", extra=("-f", "mov"))
+    assert upload(client, contents, "IMG_0004.MOV").status_code == 201
+    process_all(app)
+    video = client.get("/api/photos").json[0]
+    copy = app.config["MEDIA_ROOT"] / "_streams" / f"{video['id']}.mp4"
+    undated = tmp_path / "undated.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(copy), "-map", "0", "-c", "copy",
+         "-map_metadata", "-1", str(undated)],
+        check=True,
+    )
+    undated.replace(copy)
+    assert media.video_capture_time(media.probe(copy)) is None
+    saved = tmp_path / "downloaded.mp4"
+    saved.write_bytes(client.get(video["compatible_url"]).data)
+    assert media.video_capture_time(media.probe(saved)) == datetime(2019, 7, 4, 19, 30, tzinfo=timezone.utc)
+
+
+def test_compatible_download_repackages_h264_mov_as_mp4(client, app, tmp_path):
+    contents = make_video(
+        tmp_path / "small.mov", "creation_time=2020-05-01T10:00:00Z",
+        codec="libx264", extra=("-maxrate", "1M", "-bufsize", "2M", "-f", "mov"),
+    )
+    assert upload(client, contents, "IMG_0003.MOV").status_code == 201
+    process_all(app)
+    video = client.get("/api/photos").json[0]
+    assert not (app.config["MEDIA_ROOT"] / "_streams").exists()  # played directly, no copy
+    download = client.get(video["compatible_url"])
+    assert download.mimetype == "video/mp4"
+    assert "IMG_0003.mp4" in download.headers["Content-Disposition"]
+    saved = tmp_path / "downloaded.mp4"
+    saved.write_bytes(download.data)
+    info = media.probe(saved)
+    assert "mp4" in info["format"]["format_name"]
+    assert media.video_stream(info)["codec_name"] == "h264"
+    assert media.video_capture_time(info) == datetime(2020, 5, 1, 10, 0, tzinfo=timezone.utc)
+    assert int(download.headers["Content-Length"]) == len(download.data)
+    # The temporary file is gone.
+    assert not list(app.config["MEDIA_ROOT"].glob(".download-*"))

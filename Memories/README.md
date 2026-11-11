@@ -19,6 +19,8 @@ A private, self-hosted photo and video library for family members on your Tailsc
 
 **Viewer.** Tapping a photo or video opens it full screen. Swipe sideways (on a computer: the arrow buttons or the ← → keys) to move through the items in the order the page shows them, swipe down, press Esc or use the phone's Back gesture to close, and tap a photo to hide the bars. The tapped video starts playing; others play with the play button and pause when you swipe away. Photos show the thumbnail first, then the full-size display copy (originals are only sent by Save to Photos / Download, still in the ··· menu in the viewer).
 
+**Downloads.** Settings > Downloads chooses, per device, what Save to Photos / Download in the ··· menu gives: **Original files** (default, exactly what was uploaded) or **Most compatible (JPEG / MP4)** for computers that can't open HEIC or iPhone video. Most compatible makes a full-size JPEG of HEIC/HEIF/TIFF/WebP photos at download time, keeping their EXIF (date, location, colour profile); videos come as the 1080p streaming copy, and H.264 videos played directly are repackaged as .mp4 without re-encoding, both with the original's recording date. JPEG, PNG, GIF and MP4 files download unchanged. With Most compatible on, the menu also has Download original. Repackaging uses a temporary file on the media drive that is deleted as soon as it is opened.
+
 **Duplicates.** Detection uses SHA-256, so it catches byte-identical files, not resized or recompressed copies. Re-uploading a file that is in Recently deleted shows a notice with a Restore button.
 
 ## Accounts

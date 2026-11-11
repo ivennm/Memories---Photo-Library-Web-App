@@ -227,6 +227,38 @@ def test_heic_photo_gets_capture_date_and_jpeg_display_copy(client, app):
     assert "IMG_0001.HEIC" in original.headers["Content-Disposition"]
 
 
+def test_compatible_download_converts_heic_to_jpeg_with_its_date(client):
+    import pillow_heif
+
+    assert establish_first_user(client).status_code == 201
+    exif = Image.Exif()
+    exif.get_ifd(ExifTags.IFD.Exif)[36867] = "2021:12:25 08:15:00"
+    heic = pillow_heif.from_pillow(Image.new("RGB", (3000, 2000), "blue"))
+    image_bytes = io.BytesIO()
+    heic.save(image_bytes, exif=exif.tobytes())
+    assert upload(client, image_bytes.getvalue(), "IMG_0001.HEIC").status_code == 201
+
+    photo = client.get("/api/photos").json[0]
+    assert (photo["compatible_name"], photo["compatible_type"]) == ("IMG_0001.jpg", "image/jpeg")
+    download = client.get(photo["compatible_url"])
+    assert download.mimetype == "image/jpeg"
+    assert "IMG_0001.jpg" in download.headers["Content-Disposition"]
+    with Image.open(io.BytesIO(download.data)) as jpeg:
+        assert jpeg.format == "JPEG"
+        assert jpeg.size == (3000, 2000)  # full size, unlike the display copy
+        assert jpeg.getexif().get_ifd(ExifTags.IFD.Exif)[36867] == "2021:12:25 08:15:00"
+
+
+def test_compatible_download_of_jpeg_is_the_original(client):
+    assert establish_first_user(client).status_code == 201
+    image = io.BytesIO()
+    Image.new("RGB", (40, 30), "green").save(image, "JPEG")
+    assert upload(client, image.getvalue(), "beach.jpg").status_code == 201
+    photo = client.get("/api/photos").json[0]
+    assert photo["compatible_name"] == "beach.jpg"
+    assert client.get(photo["compatible_url"]).data == image.getvalue()
+
+
 def make_family_member(client, username="mom", password="moms-long-password"):
     response = client.post(
         "/api/admin/users", json={"username": username, "password": password}

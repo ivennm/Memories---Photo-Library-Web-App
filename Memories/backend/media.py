@@ -93,6 +93,20 @@ def run_ffmpeg(arguments: list[str]) -> None:
     )
 
 
+def remux_to_mp4(source: Path, destination: Path, metadata_from: Path | None = None) -> None:
+    """Repackages a video as .mp4 without re-encoding (same picture and sound).
+
+    The recording date and other file details come from metadata_from (the original, for a
+    streaming copy made before copies kept them) or else from the source itself.
+    """
+    inputs = ["-i", str(source)] + (["-i", str(metadata_from)] if metadata_from else [])
+    run_ffmpeg([
+        *inputs, "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+        "-map_metadata", "1" if metadata_from else "0",
+        "-movflags", "+faststart", "-f", "mp4", str(destination),
+    ])
+
+
 def video_filters(stream: dict[str, Any], scale: str, pixel_format: str | None = None) -> str:
     filters = [scale]
     if stream.get("color_transfer") in HDR_TRANSFERS:
@@ -151,6 +165,8 @@ def make_video_derivatives(
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-maxrate", "6M", "-bufsize", "12M",
             "-c:a", "aac", "-b:a", "128k",
+            # Keep the recording date (ffmpeg drops it when streams are picked with -map).
+            "-map_metadata", "0",
             # Put the index first so playback starts before the whole file has downloaded.
             "-movflags", "+faststart",
             str(temporary),

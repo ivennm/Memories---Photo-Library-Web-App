@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, type TouchEvent as ReactTouchEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Album as AlbumIcon, Check, ChevronLeft, ChevronRight, CircleUser, Download, Ellipsis, EyeOff, FolderMinus, FolderPlus, Heart,
-  Images, LoaderCircle, Play, Plus, Trash, Trash2, Users, X,
+  Images, LoaderCircle, Maximize, Pause, Play, Plus, Settings, Trash, Trash2, Users, Volume2, VolumeX, X,
 } from "lucide-react";
 
 type Session = {
@@ -22,6 +22,10 @@ type Photo = {
   deleted_at: string | null;
   content_url: string;
   original_url: string;
+  // "Most compatible" download: a JPEG for photos, an MP4 for videos (files already in those formats as they are).
+  compatible_url: string;
+  compatible_name: string;
+  compatible_type: string;
   thumbnail_url: string | null;
   processing: "pending" | "done" | "failed";
   // False when the item is in an album set to not show in All photos; it then only shows in albums.
@@ -61,7 +65,27 @@ type AlbumInfo = {
   photo_ids: string[];
 };
 
-type View = "library" | "albums" | "trash" | "family" | "account";
+type View = "library" | "albums" | "trash" | "family" | "account" | "settings";
+
+// Remembered on this device only (a person may want originals on their iPhone and JPEG/MP4 on a PC).
+type DownloadFormat = "original" | "compatible";
+const DOWNLOAD_FORMAT_KEY = "memories.downloadFormat";
+
+function getDownloadFormat(): DownloadFormat {
+  try {
+    return localStorage.getItem(DOWNLOAD_FORMAT_KEY) === "compatible" ? "compatible" : "original";
+  } catch {
+    return "original";
+  }
+}
+
+function storeDownloadFormat(format: DownloadFormat) {
+  try {
+    localStorage.setItem(DOWNLOAD_FORMAT_KEY, format);
+  } catch {
+    // Private browsing: the choice lasts until the page is reloaded.
+  }
+}
 
 class ApiError extends Error {
   constructor(
@@ -538,6 +562,9 @@ function App() {
             <Users className="icon" aria-hidden="true" /> Family accounts
           </button>
         )}
+        <button className={`nav-item nav-account ${view === "settings" ? "selected" : ""}`} onClick={() => openView("settings")}>
+          <Settings className="icon" aria-hidden="true" /> Settings
+        </button>
         <button className={`nav-item nav-account ${view === "account" ? "selected" : ""}`} onClick={() => openView("account")}>
           <CircleUser className="icon" aria-hidden="true" /> My account
         </button>
@@ -556,6 +583,9 @@ function App() {
                 {busy ? uploadStatus || "Uploading…" : <Plus className="icon" aria-hidden="true" />}
               </button>
             )}
+            <button className={`account-button ${view === "settings" ? "selected" : ""}`} onClick={() => openView("settings")} aria-label="Settings" title="Settings">
+              <Settings className="icon" aria-hidden="true" />
+            </button>
             <button className={`account-button ${view === "account" ? "selected" : ""}`} onClick={() => openView("account")} aria-label="My account" title="My account">
               <CircleUser className="icon" aria-hidden="true" />
             </button>
@@ -578,7 +608,9 @@ function App() {
             ))}
           </div>
         )}
-        {view === "account" ? (
+        {view === "settings" ? (
+          <SettingsPage />
+        ) : view === "account" ? (
           <MyAccount username={session.username ?? ""} onChanged={refresh} onError={showError} onSignOut={() => void logout()} />
         ) : view === "family" ? (
           <FamilyAccounts currentUsername={session.username ?? ""} onChanged={refresh} onError={showError} />
@@ -813,13 +845,9 @@ function PhotoViewer({ photos, startId, renderActions, onClosed }: {
             {/* Only the items next to the one on screen are loaded. */}
             {Math.abs(position - index) <= 1 && (
               isVideo(photo) ? (
-                <video
-                  data-id={photo.id}
-                  src={photo.content_url}
-                  poster={photo.thumbnail_url ?? undefined}
-                  controls
-                  playsInline
-                  preload={position === index ? "metadata" : "none"}
+                <ViewerVideo
+                  photo={photo}
+                  active={position === index}
                   // The one that was tapped in the grid starts playing.
                   autoPlay={photo.id === startId}
                 />
@@ -840,6 +868,114 @@ function PhotoViewer({ photos, startId, renderActions, onClosed }: {
           <ChevronRight className="icon" aria-hidden="true" />
         </button>
       )}
+    </div>
+  );
+}
+
+// Computers with a mouse: desktop browsers hide their own video controls while a video plays, so these
+// get a control bar that stays on screen. Phones and tablets keep the built-in controls.
+const hasMouse = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = String(whole % 60).padStart(2, "0");
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${secs}` : `${minutes}:${secs}`;
+}
+
+function ViewerVideo({ photo, active, autoPlay }: { photo: Photo; active: boolean; autoPlay: boolean }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [muted, setMuted] = useState(false);
+
+  const togglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+  }, []);
+
+  // Space plays/pauses the video on screen.
+  useEffect(() => {
+    if (!hasMouse || !active) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== " " || (event.target as HTMLElement).closest("button, input")) return;
+      event.preventDefault();
+      togglePlay();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [active, togglePlay]);
+
+  const common = {
+    "data-id": photo.id,
+    src: photo.content_url,
+    poster: photo.thumbnail_url ?? undefined,
+    playsInline: true,
+    preload: active ? "metadata" : "none",
+    autoPlay,
+  } as const;
+
+  if (!hasMouse) return <video {...common} controls />;
+
+  return (
+    <div className="viewer-video" ref={boxRef}>
+      <video
+        {...common}
+        ref={videoRef}
+        onClick={togglePlay}
+        onDoubleClick={() => void (document.fullscreenElement ? document.exitFullscreen() : boxRef.current?.requestFullscreen())}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)}
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+        onDurationChange={(event) => setDuration(event.currentTarget.duration)}
+        onVolumeChange={(event) => setMuted(event.currentTarget.muted)}
+      />
+      <div className="video-controls">
+        <button className="video-control" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} title={playing ? "Pause (space)" : "Play (space)"}>
+          {playing ? <Pause className="icon" fill="currentColor" aria-hidden="true" /> : <Play className="icon" fill="currentColor" aria-hidden="true" />}
+        </button>
+        <span className="video-time">{formatTime(time)}</span>
+        <input
+          className="video-seek"
+          type="range"
+          min={0}
+          max={duration || 0}
+          step={0.1}
+          value={Math.min(time, duration || 0)}
+          onChange={(event) => {
+            const video = videoRef.current;
+            if (video) video.currentTime = Number(event.target.value);
+            setTime(Number(event.target.value));
+          }}
+          aria-label="Seek"
+        />
+        <span className="video-time">{formatTime(duration)}</span>
+        <button
+          className="video-control"
+          onClick={() => {
+            if (videoRef.current) videoRef.current.muted = !videoRef.current.muted;
+          }}
+          aria-label={muted ? "Unmute" : "Mute"}
+          title={muted ? "Unmute" : "Mute"}
+        >
+          {muted ? <VolumeX className="icon" aria-hidden="true" /> : <Volume2 className="icon" aria-hidden="true" />}
+        </button>
+        <button
+          className="video-control"
+          onClick={() => void (document.fullscreenElement ? document.exitFullscreen() : boxRef.current?.requestFullscreen())}
+          aria-label="Full screen"
+          title="Full screen"
+        >
+          <Maximize className="icon" aria-hidden="true" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -991,16 +1127,28 @@ const canSaveToPhotos =
 // The share sheet needs the whole file in memory first; bigger files are downloaded instead.
 const SHARE_SIZE_LIMIT = 500 * 1024 * 1024;
 
-function downloadOriginal(photo: Photo) {
+type DownloadTarget = { url: string; name: string; type: string };
+
+function downloadTarget(photo: Photo, format: DownloadFormat): DownloadTarget {
+  return format === "compatible"
+    ? { url: photo.compatible_url, name: photo.compatible_name, type: photo.compatible_type }
+    : { url: photo.original_url, name: photo.original_name, type: photo.content_type };
+}
+
+function downloadFile(target: DownloadTarget) {
   const link = document.createElement("a");
-  link.href = photo.original_url;
-  link.download = photo.original_name;
+  link.href = target.url;
+  link.download = target.name;
   document.body.append(link);
   link.click();
   link.remove();
 }
 
-type SaveState = { step: "idle" } | { step: "preparing" } | { step: "ready"; file: File };
+// "chosen" is the format picked in Settings; "original" is the extra Download original item.
+type SaveState =
+  | { step: "idle" }
+  | { step: "preparing"; which: DownloadFormat }
+  | { step: "ready"; which: DownloadFormat; file: File; target: DownloadTarget };
 
 function PhotoMenu({ photo, albums, currentAlbum, onSetInAlbum, onCreateAlbum, onMoveToTrash }: {
   photo: Photo;
@@ -1030,43 +1178,67 @@ function PhotoMenu({ photo, albums, currentAlbum, onSetInAlbum, onCreateAlbum, o
     setOpen(false);
   }, []);
 
+  // Read when the menu opens, so a change in Settings applies straight away.
+  const chosenFormat = open ? getDownloadFormat() : "original";
+
   // Returns false when Safari refused because the tap that started the save was too long ago.
-  async function share(file: File) {
+  async function share(file: File, target: DownloadTarget) {
     try {
       await navigator.share({ files: [file] });
     } catch (reason) {
       if (reason instanceof DOMException && reason.name === "NotAllowedError") return false;
-      if (!(reason instanceof DOMException && reason.name === "AbortError")) downloadOriginal(photo);
+      if (!(reason instanceof DOMException && reason.name === "AbortError")) downloadFile(target);
     }
     return true;
   }
 
-  async function saveToDevice() {
+  async function saveToDevice(which: DownloadFormat) {
+    const target = downloadTarget(photo, which);
+    // The size is known for originals; converted copies are about the same size or smaller.
     if (!canSaveToPhotos || photo.size_bytes > SHARE_SIZE_LIMIT) {
-      downloadOriginal(photo);
+      downloadFile(target);
       close();
       return;
     }
     const controller = new AbortController();
     fetchRef.current = controller;
-    setSave({ step: "preparing" });
+    setSave({ step: "preparing", which });
     try {
-      const response = await fetch(photo.original_url, { signal: controller.signal });
+      const response = await fetch(target.url, { signal: controller.signal });
       if (!response.ok) throw new Error(`Download failed (${response.status}).`);
-      const file = new File([await response.blob()], photo.original_name, { type: photo.content_type });
+      // If the server couldn't convert the file it sends the original instead.
+      const converted = (response.headers.get("Content-Type") ?? "").split(";")[0] === target.type;
+      const name = converted ? target.name : photo.original_name;
+      const file = new File([await response.blob()], name, { type: converted ? target.type : photo.content_type });
       if (!navigator.canShare({ files: [file] })) {
-        downloadOriginal(photo);
-      } else if (!(await share(file))) {
+        downloadFile(target);
+      } else if (!(await share(file, target))) {
         // Downloading took long enough that Safari wants a fresh tap before opening the share sheet.
-        setSave({ step: "ready", file });
+        setSave({ step: "ready", which, file, target });
         return;
       }
     } catch (reason) {
       if (controller.signal.aborted) return;
-      downloadOriginal(photo);
+      downloadFile(target);
     }
     close();
   }
+
+  const saveLabel = canSaveToPhotos ? "Save to Photos" : "Download";
+  const saveItem = (which: DownloadFormat, label: string) =>
+    save.step === "ready" && save.which === which ? (
+      <button className="menu-item" role="menuitem" onClick={() => void share(save.file, save.target).then(close)}>
+        <Download className="icon" aria-hidden="true" /> Tap to save
+      </button>
+    ) : (
+      <button className="menu-item" role="menuitem" disabled={save.step !== "idle"} onClick={() => void saveToDevice(which)}>
+        {save.step === "preparing" && save.which === which ? (
+          <><LoaderCircle className="icon spin" aria-hidden="true" /> Preparing…</>
+        ) : (
+          <><Download className="icon" aria-hidden="true" /> {label}</>
+        )}
+      </button>
+    );
 
   useEffect(() => {
     if (!open) return;
@@ -1130,19 +1302,8 @@ function PhotoMenu({ photo, albums, currentAlbum, onSetInAlbum, onCreateAlbum, o
       )}
       {open && pane === "main" && (
         <div className="menu-list" role="menu">
-          {save.step === "ready" ? (
-            <button className="menu-item" role="menuitem" onClick={() => void share(save.file).then(close)}>
-              <Download className="icon" aria-hidden="true" /> Tap to save
-            </button>
-          ) : (
-            <button className="menu-item" role="menuitem" disabled={save.step === "preparing"} onClick={() => void saveToDevice()}>
-              {save.step === "preparing" ? (
-                <><LoaderCircle className="icon spin" aria-hidden="true" /> Preparing…</>
-              ) : (
-                <><Download className="icon" aria-hidden="true" /> {canSaveToPhotos ? "Save to Photos" : "Download"}</>
-              )}
-            </button>
-          )}
+          {saveItem(chosenFormat, saveLabel)}
+          {chosenFormat === "compatible" && saveItem("original", canSaveToPhotos ? "Save original" : "Download original")}
           {favorites && (
             <button
               className="menu-item"
@@ -1387,6 +1548,56 @@ function FamilyAccounts({ currentUsername, onChanged, onError }: {
             </li>
           ))}
         </ul>
+      </section>
+    </div>
+  );
+}
+
+function SettingsPage() {
+  const [format, setFormat] = useState<DownloadFormat>(getDownloadFormat);
+  function choose(next: DownloadFormat) {
+    setFormat(next);
+    storeDownloadFormat(next);
+  }
+  const options: { value: DownloadFormat; title: string; text: string }[] = [
+    {
+      value: "original",
+      title: "Original files",
+      text: "Exactly what was uploaded, at full quality (iPhone photos as HEIC, videos as MOV). Best for iPhone, iPad and Mac.",
+    },
+    {
+      value: "compatible",
+      title: "Most compatible (JPEG / MP4)",
+      text: "Photos as full-size JPEG and videos as MP4, which open on any computer. Best for Windows PCs. Videos come as the 1080p copy the app plays, which is smaller but not full quality. Photos and videos keep the date they were taken.",
+    },
+  ];
+  return (
+    <div className="family-panel">
+      <section className="panel-card">
+        <h2>Downloads</h2>
+        <p className="muted">
+          What Save to Photos / Download in the ··· menu gives you. This is remembered on this device only, so you can choose
+          differently on your phone and your computer.
+        </p>
+        <div className="choice-list" role="radiogroup" aria-label="Download format">
+          {options.map((option) => (
+            <label key={option.value} className={`choice ${format === option.value ? "selected" : ""}`}>
+              <input
+                type="radio"
+                name="download-format"
+                checked={format === option.value}
+                onChange={() => choose(option.value)}
+              />
+              <span>
+                <strong>{option.title}</strong>
+                <span>{option.text}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        {format === "compatible" && (
+          <p className="muted settings-note">The ··· menu also has Download original, for when you need the untouched file.</p>
+        )}
       </section>
     </div>
   );

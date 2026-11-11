@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import mimetypes
 import os
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,10 @@ VIDEO_EXTENSIONS = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
 DISPLAY_COPY_EXTENSIONS = {"heic", "heif", "tif", "tiff"}
 DISPLAY_COPY_MAX_EDGE = 2560
 DISPLAY_COPY_DIRECTORY = "_previews"
+# "Most compatible" downloads: photos in these formats (and MP4 videos) are sent as they are;
+# other photos become a full-size JPEG and other videos an MP4.
+COMPATIBLE_PHOTO_TYPES = {"image/jpeg", "image/png", "image/gif"}
+COMPATIBLE_JPEG_QUALITY = 92
 TRASH_RETENTION = timedelta(days=30)
 INVITE_LIFETIME = timedelta(days=7)
 # How long a device stays signed in without being used; every visit restarts the 30 days.
@@ -303,6 +309,25 @@ def create_app() -> Flask:
         data = request.get_json(silent=True)
         return data if isinstance(data, dict) else {}
 
+    def compatible_download(row: sqlite3.Row) -> tuple[str, str, str]:
+        """How a "most compatible" download is made: (method, file name, media type).
+
+        method is "original" (already JPEG/PNG/GIF or MP4), "stream" (the 1080p H.264 copy the app
+        plays), "remux" (an H.264 video played directly, repackaged as .mp4 without re-encoding) or
+        "jpeg" (a photo converted to a full-size JPEG that keeps its EXIF date).
+        """
+        stem = Path(row["original_name"]).stem or "memories"
+        content_type = row["content_type"]
+        if content_type.startswith("video/"):
+            if row["stream_path"]:
+                return "stream", f"{stem}.mp4", "video/mp4"
+            if content_type == "video/mp4":
+                return "original", row["original_name"], content_type
+            return "remux", f"{stem}.mp4", "video/mp4"
+        if content_type in COMPATIBLE_PHOTO_TYPES:
+            return "original", row["original_name"], content_type
+        return "jpeg", f"{stem}.jpg", "image/jpeg"
+
     def photo_json(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
@@ -315,6 +340,9 @@ def create_app() -> Flask:
             "deleted_at": row["deleted_at"],
             "content_url": f"/api/photos/{row['id']}/content",
             "original_url": f"/api/photos/{row['id']}/original",
+            "compatible_url": f"/api/photos/{row['id']}/compatible",
+            "compatible_name": compatible_download(row)[1],
+            "compatible_type": compatible_download(row)[2],
             "thumbnail_url": f"/api/photos/{row['id']}/thumbnail" if row["thumb_path"] else None,
             "processing": row["processing"],
             "in_all_photos": bool(row["in_all_photos"]),
@@ -653,6 +681,64 @@ def create_app() -> Flask:
     @app.get("/api/photos/<photo_id>/original")
     def photo_original(photo_id: str) -> Any:
         row = photo_row(photo_id)
+        return send_media(
+            row["relative_path"], row["content_type"],
+            as_attachment=True, download_name=row["original_name"],
+        )
+
+    @app.get("/api/photos/<photo_id>/compatible")
+    def photo_compatible(photo_id: str) -> Any:
+        """The "most compatible" download: JPEG for photos, MP4 (H.264) for videos."""
+        row = photo_row(photo_id)
+        method, name, mimetype = compatible_download(row)
+        original = media_path(row["relative_path"])
+        if original is None or not original.is_file():
+            abort(404)
+        if method == "jpeg":
+            try:
+                with Image.open(original) as image:
+                    icc_profile = image.info.get("icc_profile")
+                    # Turn the pixels upright; the copy's EXIF then says "no rotation needed".
+                    upright = ImageOps.exif_transpose(image)
+                    exif = upright.getexif()
+                    exif.get_ifd(ExifTags.IFD.Exif)  # loaded so the date and camera details are kept
+                    output = io.BytesIO()
+                    upright.convert("RGB").save(
+                        output, "JPEG", quality=COMPATIBLE_JPEG_QUALITY,
+                        exif=exif.tobytes(), icc_profile=icc_profile,
+                    )
+            except (OSError, ValueError, KeyError, SyntaxError):
+                logger.warning("Could not convert %s to JPEG; sending the original", photo_id, exc_info=True)
+            else:
+                output.seek(0)
+                return send_file(output, mimetype=mimetype, as_attachment=True, download_name=name)
+        elif method in ("stream", "remux"):
+            # An .mp4 with the original's recording date, so it lands on the
+            # right day when saved to Photos (older streaming copies don't have the date inside).
+            stream = media_path(row["stream_path"]) if method == "stream" and row["stream_path"] else None
+            if method == "stream" and (stream is None or not stream.is_file()):
+                abort(404)
+            if not media_drive_available():
+                return jsonify({"error": "The photo library drive is unavailable. Try again later."}), 503
+            # On the media drive, never the OS disk. The file is deleted as soon as it is open, so
+            # nothing is left behind even if the download is cut off; it is read until sent.
+            temp_path = media_root / f".download-{uuid.uuid4().hex}.mp4"
+            try:
+                if stream is not None:
+                    media.remux_to_mp4(stream, temp_path, metadata_from=original)
+                else:
+                    media.remux_to_mp4(original, temp_path)
+                remuxed = temp_path.open("rb")
+            except (OSError, subprocess.SubprocessError):
+                logger.warning("Could not repackage %s as MP4", photo_id, exc_info=True)
+                if stream is not None:
+                    return send_media(row["stream_path"], mimetype, as_attachment=True, download_name=name)
+            else:
+                response = send_file(remuxed, mimetype=mimetype, as_attachment=True, download_name=name)
+                response.content_length = os.fstat(remuxed.fileno()).st_size
+                return response
+            finally:
+                temp_path.unlink(missing_ok=True)
         return send_media(
             row["relative_path"], row["content_type"],
             as_attachment=True, download_name=row["original_name"],

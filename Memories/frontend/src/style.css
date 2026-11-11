@@ -186,7 +186,7 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 }
 
 /* Grid cards open the full-screen viewer. */
-.photo-open { position: relative; display: block; width: 100%; padding: 0; background: #efeee9; border: 0; border-radius: 8px 8px 0 0; overflow: hidden; cursor: zoom-in; }
+.photo-open { position: relative; display: block; width: 100%; padding: 0; background: #efeee9; border: 0; border-radius: 8px 8px 0 0; overflow: hidden; cursor: default; }
 .photo-open > img, .photo-open > video { display: block; width: 100%; height: 180px; object-fit: cover; pointer-events: none; }
 .play-badge { position: absolute; right: 8px; bottom: 8px; display: grid; place-items: center; width: 28px; height: 28px; color: #fff; background: #0008; border-radius: 50%; font-size: 11px; pointer-events: none; }
 
@@ -194,8 +194,9 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .viewer { position: fixed; inset: 0; z-index: 50; height: 100dvh; color: #fff; background: #000; }
 .viewer-track { display: flex; height: 100%; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; overscroll-behavior: contain; scrollbar-width: none; touch-action: pan-x pinch-zoom; }
 .viewer-track::-webkit-scrollbar { display: none; }
-.viewer-slide { display: grid; place-items: center; flex: 0 0 100%; height: 100%; scroll-snap-align: center; scroll-snap-stop: always; }
-.viewer-slide > video { max-width: 100%; max-height: 100%; padding-top: calc(64px + env(safe-area-inset-top)); padding-bottom: env(safe-area-inset-bottom); }
+.viewer-slide { position: relative; flex: 0 0 100%; height: 100%; scroll-snap-align: center; scroll-snap-stop: always; }
+/* Fills the screen and fits the video inside, so the controls at its bottom edge are always on screen. */
+.viewer-slide > video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding-top: calc(64px + env(safe-area-inset-top)); padding-bottom: env(safe-area-inset-bottom); }
 .viewer-image { position: relative; width: 100%; height: 100%; }
 .viewer-image img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; transition: opacity .2s; user-select: none; -webkit-user-select: none; }
 .viewer-image img.loading { opacity: 0; }
@@ -223,3 +224,24 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 @media (pointer: coarse) {
   .viewer-prev, .viewer-next { display: none; }
 }
+
+/* Video control bar on computers (stays visible while playing). */
+.viewer-video { position: absolute; inset: 0; display: flex; flex-direction: column; padding-top: calc(64px + env(safe-area-inset-top)); background: #000; }
+.viewer-video video { flex: 1; min-height: 0; width: 100%; object-fit: contain; cursor: pointer; }
+.video-controls { display: flex; align-items: center; gap: 12px; padding: 10px 76px 16px; }
+.video-control { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; color: #fff; background: none; border: 0; border-radius: 50%; font-size: 15px; }
+.video-control:hover { background: #ffffff26; }
+.video-time { min-width: 38px; color: #ffffffcc; font-size: 12px; font-variant-numeric: tabular-nums; text-align: center; }
+.video-seek { flex: 1; min-width: 0; accent-color: #fff; cursor: pointer; }
+.viewer-video:fullscreen { padding-top: 0; }
+
+/* Settings */
+.choice-list { display: grid; gap: 10px; }
+.choice { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border: 1px solid #e6e5df; border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; }
+.choice:hover { border-color: #c9d3e3; }
+.choice.selected { background: #f3f6fb; border-color: #1f3a68; }
+.choice input { width: 18px; height: 18px; flex: none; margin: 1px 0 0; accent-color: #1f3a68; cursor: pointer; }
+.choice > span { display: grid; gap: 4px; }
+.choice strong { font-size: 13px; }
+.choice > span > span { color: #6d6e66; font-size: 12px; line-height: 1.5; }
+.settings-note { margin: 14px 0 0 !important; }
