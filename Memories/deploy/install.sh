@@ -72,7 +72,7 @@ SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 DATABASE_PATH=$DATA_DIR/photolibrary.sqlite3
 MEDIA_MOUNT=$MEDIA_MOUNT
 MEDIA_ROOT=$MEDIA_DIR/library
-MAX_UPLOAD_MB=2048
+MAX_UPLOAD_MB=4096
 # Served over HTTPS by tailscale serve (sudo tailscale serve --bg 8000), which forwards to this port.
 # For plain HTTP on the Tailscale address instead: MEMORIES_BIND=$TAILSCALE_IP:8000 and
 # SESSION_COOKIE_SECURE=false.

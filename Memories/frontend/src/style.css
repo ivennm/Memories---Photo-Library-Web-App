@@ -245,3 +245,14 @@ h1 { margin-bottom: 0; font: 700 29px "Avenir Next", Avenir, sans-serif; letter-
 .choice strong { font-size: 13px; }
 .choice > span > span { color: #6d6e66; font-size: 12px; line-height: 1.5; }
 .settings-note { margin: 14px 0 0 !important; }
+
+/* Computers: the card under the mouse lifts slightly to show it can be opened. */
+@media (hover: hover) and (pointer: fine) {
+  .photo-card { transition: transform .18s ease, box-shadow .18s ease; }
+  .photo-card:hover { transform: scale(1.03); box-shadow: 0 10px 28px #27292326; }
+  /* Keep the lifted card (and its open ··· menu) above its neighbours. */
+  .photo-card:hover, .photo-card:focus-within { z-index: 2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .photo-card, .photo-card:hover { transition: none; transform: none; }
+}

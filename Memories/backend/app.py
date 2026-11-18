@@ -219,7 +219,7 @@ def create_app() -> Flask:
     app.config["FRONTEND_DIST"] = Path(
         os.environ.get("FRONTEND_DIST", Path(__file__).resolve().parent.parent / "frontend" / "dist")
     ).resolve()
-    max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", "2048"))
+    max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", "4096"))
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"

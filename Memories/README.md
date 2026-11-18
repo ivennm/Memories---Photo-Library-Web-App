@@ -94,7 +94,7 @@ Run Gunicorn under `systemd` (not Flask's development server). Gunicorn listens 
    DATABASE_PATH=/var/lib/memories/photolibrary.sqlite3
    MEDIA_MOUNT=/mnt/drive-2
    MEDIA_ROOT=/mnt/drive-2/memories/library
-   MAX_UPLOAD_MB=2048
+   MAX_UPLOAD_MB=4096
    MEMORIES_BIND=127.0.0.1:8000
    SESSION_COOKIE_SECURE=true
    ```
